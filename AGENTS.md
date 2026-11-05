@@ -1,11 +1,11 @@
 # AGENTS.md — nearpay-rails
 
-You are working in **nearpay-rails**, one of 26 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
+You are working in **nearpay-rails**, one of 27 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
 Scope: Value movement: route providers (1Click, sandbox, direct-intents), token registry, pricing/FX, executions, tracking (hot poller, Explorer feed, NEAR indexer, destination watchers with amount tags), Tier-A chain verifiers.
 
 ## Before changing anything
 
-1. Read `../nearpay-brain/AGENTS.md`, then the docs listed in this repo's README.
+1. Read `../nearpay-brain/AGENTS.md`, then this repo's LLD (`../nearpay-brain/lld/rails.md`) — it is the implementation spec; do not make design decisions it already makes.
 2. Contracts (requests, responses, events, errors) come from `@nearpay/spec`. If one must change, open a PR in `nearpay-spec` first; never hand-write contract types here.
 3. Check your change against invariants INV-1…INV-9 in `nearpay-brain/product/requirements.md`.
 

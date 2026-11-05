@@ -9,12 +9,15 @@
 | Ships as | image: ghcr.io/nearpay-money/rails · routes /v1/assets; internal /executions, /quotes |
 | Owns | Execution, ProviderObservation, Verification, TokenRegistry, PriceSnapshot |
 | Depends on (published artifacts only) | spec, kit, compliance, sandbox, 1Click, RPCs |
-| Roadmap phase | P1 Core payments |
+| First built in | Stage 1 (step 1.2) |
 
 ## Documentation
 
 This repo stays surgical: design docs live in [`nearpay-brain`](../nearpay-brain/README.md), not here.
 
+- `nearpay-brain/lld/rails.md` — **low-level design (dev-ready; implement from this)**
+- `nearpay-brain/lld/audits/rails.md` — audit findings already folded into the LLD
+- `nearpay-brain/roadmap/development-plan.md` — stage and step this repo is built in
 - `nearpay-brain/architecture/hld.md` — system design
 - `nearpay-brain/architecture/repositories.md` — repo topology and dependency rules
 - `nearpay-brain/architecture/hld.md#10-rails-architecture-value-movement`
@@ -68,4 +71,8 @@ nearpay-rails/
 
 ## Status
 
-Scaffold only. Implementation starts in phase **P1 Core payments** (`nearpay-brain/roadmap/roadmap.md`).
+Scaffold only. Implementation starts in **Stage 1 (step 1.2)** (`nearpay-brain/roadmap/development-plan.md`).
+
+## Built with
+
+Libraries are listed here as they are added (hackathon rule Q-005). Code and documentation are written with AI assistance (Claude) under human direction and review.
