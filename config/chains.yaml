@@ -1,0 +1,136 @@
+# Chain profiles (lld/rails.md §4 "Chain profiles"), versioned with the code; NP_CHAINS_FILE overrides.
+#
+# A chain listed here is a chain NearPay routes to and from. Stage 1 verifies Tier A chains
+# independently (NEAR, Ethereum, Base, Arbitrum: indexer/watchers/verifier, ADR-0012); Tier B chains
+# settle on the provider's word within NP_TIER_B_LIMITS. Values:
+#   blockchain              1Click `blockchain` code
+#   tier                    A | B
+#   min_deadline_s          shortest deposit window offered (payments hides slower routes, FR-PAY-05)
+#   default_deadline_s      deposit window of a new execution (capped by the session expiry)
+#   finality                evidence rule (evm: `finalized` block tag, near: final, bitcoin: confirmations)
+#   verification_timeout_s  provider SUCCESS → evidence deadline, then `held` (rails §8.8). L2 `finalized`
+#                           follows L1 finality (~15–20 min), so EVM timeouts allow for it.
+#   watcher                 destination watcher (EVM ERC-20 logs) runs for this chain
+#   watch_interval_s        watcher cadence (2 s L2, 12 s L1)
+#   memo_mode               none | required (memo chains are not supported as destinations)
+chains:
+  - chain: near:mainnet
+    blockchain: near
+    tier: A
+    min_deadline_s: 120
+    default_deadline_s: 1800
+    finality: final
+    verification_timeout_s: 600
+    watcher: false
+    memo_mode: none
+  - chain: eip155:1
+    blockchain: eth
+    tier: A
+    min_deadline_s: 600
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 2700
+    watcher: true
+    watch_interval_s: 12
+    memo_mode: none
+  - chain: eip155:8453
+    blockchain: base
+    tier: A
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 3600
+    watcher: true
+    watch_interval_s: 2
+    memo_mode: none
+  - chain: eip155:42161
+    blockchain: arb
+    tier: A
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 3600
+    watcher: true
+    watch_interval_s: 2
+    memo_mode: none
+  - chain: eip155:10
+    blockchain: op
+    tier: B
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 1800
+    watcher: false
+    memo_mode: none
+  - chain: eip155:137
+    blockchain: pol
+    tier: B
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 1800
+    watcher: false
+    memo_mode: none
+  - chain: eip155:56
+    blockchain: bsc
+    tier: B
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 1800
+    watcher: false
+    memo_mode: none
+  - chain: eip155:43114
+    blockchain: avax
+    tier: B
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 1800
+    watcher: false
+    memo_mode: none
+  - chain: eip155:100
+    blockchain: gnosis
+    tier: B
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 1800
+    watcher: false
+    memo_mode: none
+  - chain: solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp
+    blockchain: sol
+    tier: B
+    min_deadline_s: 300
+    default_deadline_s: 1800
+    finality: finalized
+    verification_timeout_s: 1800
+    watcher: false
+    memo_mode: none
+  - chain: bip122:000000000019d6689c085ae165831e93
+    blockchain: btc
+    tier: B
+    min_deadline_s: 3600
+    default_deadline_s: 7200
+    finality: 1 confirmation < USD 1k, else 2
+    verification_timeout_s: 7200
+    watcher: false
+    memo_mode: none
+  - chain: bip122:12a765e31ffd4059bada1e25190f6e98
+    blockchain: ltc
+    tier: B
+    min_deadline_s: 1800
+    default_deadline_s: 3600
+    finality: 6 confirmations
+    verification_timeout_s: 5400
+    watcher: false
+    memo_mode: none
+  - chain: bip122:1a91e3dace36e2be3bf030a65679fe82
+    blockchain: doge
+    tier: B
+    min_deadline_s: 1800
+    default_deadline_s: 3600
+    finality: 6 confirmations
+    verification_timeout_s: 5400
+    watcher: false
+    memo_mode: none

@@ -18,6 +18,14 @@ Scope: Value movement: route providers (1Click, sandbox, direct-intents), token 
 - Money is bigint base units + asset/currency (`@nearpay-internal/money`). No floats.
 - Consumers dedupe by event ID (inbox table) and ignore stale `aggregate_version`.
 
+## Rails specifics
+
+- An execution changes only through `app/ledger.ts` `applyChange` (row + transition + outbox, version-checked) under a row lock; never update `state` elsewhere.
+- Never mark `succeeded` from a provider status (INV-2): evidence only (`applyEvidence`).
+- Never weaken a quote integrity check (`domain/execution/integrity.ts`) or the appFees split check; a quote that fails is refused and alerted.
+- Providers assert their mode (`oneclick` live only, `sandbox` test only) — keep it that way (INV-8).
+- Tests never call real 1Click or mainnet RPCs: use the fakes, recorded fixtures, Anvil and the sandbox image.
+
 ## Never
 
 - Import source code from another NearPay repo (depend on published packages/images only).

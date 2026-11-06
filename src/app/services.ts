@@ -1,0 +1,393 @@
+/**
+ * Process wiring (lld/rails.md §2):
+ * - `api`      internal executions/options/minimums/evidence/assets routes; public `GET /v1/assets`
+ * - `tracker`  hot poller (N replicas, SKIP LOCKED) and verifier
+ * - `feeds`    leader-elected loops (token refresh, sandbox feed, NEAR indexer, EVM watchers,
+ *              Explorer feed), consumers, jobs, outbox relay
+ */
+import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { fileURLToPath } from "node:url";
+import type { KeySource } from "@nearpay-internal/auth";
+import { serviceTokenClient } from "@nearpay-internal/auth";
+import {
+  type Bus,
+  busReady,
+  connectBus,
+  consumerLag,
+  domainConsumersTask,
+  durablesOf,
+  ensureStreams,
+  publish,
+} from "@nearpay-internal/bus";
+import {
+  createDb,
+  type Database,
+  deadLettersOpen,
+  jobsDue,
+  jobWorkerTask,
+  leaderTask,
+  migrationStatus,
+  outboxLagSeconds,
+  outboxRelayTask,
+  recurringJobsTask,
+  sql,
+} from "@nearpay-internal/db";
+import { type BackgroundTask, createService, type Service } from "@nearpay-internal/service";
+import { STREAMS, type Subject } from "@nearpay-internal/spec";
+import { parse as parseYaml } from "yaml";
+import { railsRoutes } from "../api/routes.js";
+import { type ApiConfig, evmRpcUrls, type FeedsConfig, type SharedConfig, type TrackerConfig } from "../config.js";
+import { deadLetters, railsHandlers } from "../consumers/handlers.js";
+import { DEFAULT_POLICY } from "../domain/pricing/pricing.js";
+import { type ChainProfiles, chainProfiles } from "../domain/token-registry/chain-profiles.js";
+import { type Budgets, budgets as createBudgets } from "../infra/budget.js";
+import { complianceScreening, type Screening } from "../infra/clients/compliance.js";
+import { type EvmRpc, evmRpc } from "../infra/clients/evm.js";
+import { type Explorer, explorer as explorerClient } from "../infra/clients/explorer.js";
+import { type Neardata, type NearRpc, neardata as neardataClient, nearRpc } from "../infra/clients/near.js";
+import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
+import type { DB } from "../infra/db/schema.js";
+import { oneClickProvider } from "../providers/oneclick/client.js";
+import { sandboxProvider } from "../providers/sandbox/client.js";
+import { loop } from "../trackers/cursors.js";
+import { watchOnce } from "../trackers/destination-watchers/evm-watcher.js";
+import { explorerOnce } from "../trackers/explorer-feed/feed.js";
+import { pollerTask } from "../trackers/hot-poller/poller.js";
+import { indexOnce, sandboxFeedOnce } from "../trackers/near-indexer/indexer.js";
+import { verifierTask } from "../verifiers/verifier.js";
+import { jobHandlers, RECURRING } from "../workers/jobs.js";
+import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
+import { refreshTokens } from "./tokens.js";
+
+export const DEFAULT_CHAINS_FILE = fileURLToPath(new URL("../../config/chains.yaml", import.meta.url));
+
+export function loadProfiles(file = DEFAULT_CHAINS_FILE): ChainProfiles {
+  return chainProfiles(parseYaml(readFileSync(file, "utf8")));
+}
+
+export interface ServiceDeps {
+  database?: Database<DB>;
+  keys?: KeySource;
+  serviceToken?: () => Promise<string>;
+  providers?: Providers;
+  screening?: Screening;
+  budgets?: Budgets;
+  fetch?: typeof fetch;
+  random?: () => number;
+  now?: () => number;
+}
+
+const usdMicros = (usd: number) => BigInt(Math.round(usd * 1_000_000));
+
+function readiness(database: Database<DB>) {
+  return {
+    db: () => sql`select 1`.execute(database.db),
+    migrations: async () => {
+      const s = await migrationStatus(database.db, MIGRATIONS_DIR);
+      if (s.pending.length || s.drift.length)
+        throw new Error(`pending ${s.pending.join(",") || "-"} drift ${s.drift.join(",") || "-"}`);
+    },
+  };
+}
+
+interface Built {
+  rails: Rails;
+  database: Database<DB>;
+  budgets: Budgets;
+  serviceToken: () => Promise<string>;
+}
+
+function build(config: SharedConfig, deps: ServiceDeps, app: string): Built {
+  const database = deps.database ?? createDb<DB>({ url: config.dbUrl, applicationName: `rails-${app}` });
+  const serviceToken =
+    deps.serviceToken ??
+    (() => {
+      const c = serviceTokenClient({
+        identityUrl: config.identityUrl,
+        clientId: "rails",
+        secret: config.serviceClientSecret,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      });
+      return () => c.getToken();
+    })();
+  const budgets = deps.budgets ?? createBudgets({ valkeyUrl: config.valkeyUrl });
+  const providers: Providers = deps.providers ?? {
+    live: oneClickProvider({
+      baseUrl: config.oneclickBaseUrl,
+      apiKey: config.oneclickApiKey,
+      ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      takeQuote: () => budgets.take("oneclick:quote", config.oneclickQuoteRps, 1_000),
+      takeStatus: () => budgets.take("oneclick:status", config.oneclickStatusRps, 0),
+    }),
+    test:
+      config.sandboxBaseUrl && config.sandboxSigningPubkey
+        ? sandboxProvider({
+            baseUrl: config.sandboxBaseUrl,
+            signingPubkey: config.sandboxSigningPubkey,
+            serviceToken,
+            ...(deps.fetch ? { fetch: deps.fetch } : {}),
+          })
+        : null,
+  };
+  const rails: Rails = {
+    env: config.env,
+    db: database.db,
+    log: undefined as unknown as Rails["log"],
+    metrics: noMetrics,
+    profiles: loadProfiles(config.chainsFile),
+    providers,
+    screening:
+      deps.screening ??
+      complianceScreening({
+        baseUrl: config.complianceUrl,
+        serviceToken,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      }),
+    treasury: config.treasuryAccount ?? null,
+    testTreasury: config.testTreasuryAccount,
+    intentsContract: config.intentsContract,
+    referral: config.referral,
+    pricing: { ...DEFAULT_POLICY, currencies: new Set(config.pricingCurrencies) },
+    slippageBps: config.slippageBps,
+    indicativeFeeBps: config.indicativeFeeBps,
+    providerSplit: {
+      shareBps: config.providerSplit.share_bps,
+      floorBps: config.providerSplit.floor_bps,
+      stableFloorBps: config.providerSplit.stable_floor_bps,
+    },
+    tierB: {
+      perPaymentUsdMicros: usdMicros(config.tierBLimits.per_payment_usd),
+      perDayUsdMicros: usdMicros(config.tierBLimits.per_day_usd),
+    },
+    explorerEnabled: config.explorerEnabled && Boolean(config.explorerToken),
+    awaitingSweepS: config.awaitingSweepS,
+    screeningFailClosedUsdMicros: usdMicros(config.screeningFailClosedUsd),
+    agreementUsdMicros: usdMicros(config.agreementUsd),
+    random: deps.random ?? Math.random,
+    now: deps.now ?? Date.now,
+  };
+  return { rails, database, budgets, serviceToken };
+}
+
+function attach(b: Built, service: Service, deps: ServiceDeps) {
+  b.rails.log = service.log;
+  b.rails.metrics = railsMetrics(service.metrics);
+  service.onShutdown(async () => {
+    await b.budgets.close();
+    if (!deps.database) await b.database.close();
+  });
+}
+
+/** The rails context for the ops CLI (no listener, no background tasks). */
+export function createOpsContext(
+  config: SharedConfig,
+  log: Rails["log"],
+  deps: ServiceDeps = {},
+): { rails: Rails; close(): Promise<void> } {
+  const b = build(config, deps, "ops");
+  b.rails.log = log;
+  return {
+    rails: b.rails,
+    async close() {
+      await b.budgets.close();
+      if (!deps.database) await b.database.close();
+    },
+  };
+}
+
+export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service: Service; rails: Rails } {
+  const b = build(config, deps, "api");
+  const service = createService({
+    name: "rails",
+    config,
+    ...(deps.keys ? { keys: deps.keys } : {}),
+    routes: railsRoutes(b.rails),
+    readiness: readiness(b.database),
+  });
+  attach(b, service, deps);
+  return { service, rails: b.rails };
+}
+
+export interface TrackerDeps extends ServiceDeps {
+  near?: NearRpc | null;
+  evm?: ReadonlyMap<string, EvmRpc>;
+  tickMs?: number;
+}
+
+export function evmPools(config: SharedConfig, profiles: ChainProfiles, f?: typeof fetch): Map<string, EvmRpc> {
+  const urls = evmRpcUrls(config);
+  const out = new Map<string, EvmRpc>();
+  for (const p of profiles.all()) {
+    if (p.family !== "evm" || p.tier !== "A") continue;
+    const list = urls[p.chain];
+    if (list?.length) out.set(p.chain, evmRpc({ urls: list, ...(f ? { fetch: f } : {}) }));
+  }
+  return out;
+}
+
+export function createTracker(config: TrackerConfig, deps: TrackerDeps = {}): { service: Service; rails: Rails } {
+  const b = build(config, deps, "tracker");
+  const service = createService({ name: "rails", config, readiness: readiness(b.database) });
+  attach(b, service, deps);
+  const verifierDeps = {
+    near:
+      deps.near === undefined
+        ? nearRpc({ urls: config.nearRpcUrls, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
+        : deps.near,
+    evm: deps.evm ?? evmPools(config, b.rails.profiles, deps.fetch),
+  };
+  service.addBackground(pollerTask(b.rails, deps.tickMs ? { tickMs: deps.tickMs } : {}));
+  service.addBackground(verifierTask(b.rails, verifierDeps, deps.tickMs ? { tickMs: deps.tickMs } : {}));
+  service.metrics.gauge("executions_inflight", "Executions not yet terminal, by state.", ["state"], async (g) => {
+    const rows = await sql<{ state: string; n: string }>`
+      select state, count(*)::text as n from executions where terminal_at is null group by state`.execute(
+      b.database.db,
+    );
+    g.reset();
+    for (const x of rows.rows) g.set({ state: x.state }, Number(x.n));
+  });
+  return { service, rails: b.rails };
+}
+
+export interface FeedsDeps extends ServiceDeps {
+  bus?: Bus;
+  neardata?: Neardata | null;
+  evm?: ReadonlyMap<string, EvmRpc>;
+  explorer?: Explorer | null;
+  tickMs?: number;
+  /** Loop cadences (tests shorten them). */
+  intervals?: Partial<Record<"tokens" | "sandbox" | "indexer" | "watcher", number>>;
+}
+
+export async function createFeeds(
+  config: FeedsConfig,
+  deps: FeedsDeps = {},
+): Promise<{ service: Service; rails: Rails }> {
+  const b = build(config, deps, "feeds");
+  const r = b.rails;
+  const service = createService({ name: "rails", config, readiness: readiness(b.database) });
+  attach(b, service, deps);
+  const db = b.database;
+
+  const bus = deps.bus ?? (await connectBus({ url: config.natsUrl, name: `rails-feeds@${hostname()}` }));
+  await ensureStreams(bus, [STREAMS.rails]);
+  service.addReadiness("bus", () => {
+    if (!busReady(bus)) throw new Error("NATS connection is closed");
+  });
+  const handlers = railsHandlers(db.db);
+  const durables = durablesOf("rails", Object.keys(handlers) as Subject[]);
+  service.metrics.collectConsumerLag(async () =>
+    Object.fromEntries(
+      await Promise.all(durables.map(async (d) => [d.durable, await consumerLag(bus, d.stream, d.durable)])),
+    ),
+  );
+  service.metrics.collectOutboxLag(() => outboxLagSeconds(db.db));
+  service.metrics.collectJobsDue(() => jobsDue(db.db));
+  service.metrics.collectDeadLettersOpen(() => deadLettersOpen(db.db));
+
+  const onError = (e: unknown) => service.log.error({ err: e }, "background error");
+  service.addBackground(
+    outboxRelayTask({
+      db: db.db,
+      pool: db.pool,
+      publish: (s, e, mid) => publish(bus, s, e, mid).then(() => {}),
+      onError,
+    }),
+  );
+  service.addBackground(
+    domainConsumersTask({ bus, consumer: "rails", handlers, onDeadLetter: deadLetters(db.db), onError }),
+  );
+  service.addBackground(
+    jobWorkerTask({
+      db: db.db,
+      workerId: `rails-feeds@${hostname()}:${process.pid}`,
+      handlers: jobHandlers(r),
+      onError: (e, job) => service.log.warn({ err: e, job }, "job failed"),
+      onDeadLetter: (j) => service.log.error({ job: j }, "job dead-lettered"),
+      ...(deps.tickMs ? { pollMs: deps.tickMs } : {}),
+    }),
+  );
+  service.addBackground(
+    recurringJobsTask({
+      db: db.db,
+      pool: db.pool,
+      name: "rails:recurring-jobs",
+      jobs: RECURRING,
+      onError,
+      ...(deps.tickMs ? { tickMs: deps.tickMs } : {}),
+    }),
+  );
+
+  const iv = { tokens: 30_000, sandbox: 1_000, indexer: 1_000, watcher: 0, ...deps.intervals };
+  const leader = (name: string, run: (signal: AbortSignal) => Promise<void>): BackgroundTask =>
+    leaderTask({
+      pool: db.pool,
+      name: `rails:${name}`,
+      run,
+      onError,
+      ...(deps.tickMs ? { retryMs: deps.tickMs } : {}),
+    });
+
+  service.addBackground(
+    leader("token-refresh", (signal) =>
+      loop(r, "token-refresh", signal, async () => {
+        for (const lm of [false, true]) {
+          if (!(lm ? r.providers.live : r.providers.test)) continue;
+          await refreshTokens(r, lm).catch((e) => r.log.warn({ err: e, livemode: lm }, "token refresh failed"));
+        }
+        return iv.tokens;
+      }),
+    ),
+  );
+  if (r.providers.test) {
+    service.addBackground(
+      leader("sandbox-feed", (signal) =>
+        loop(r, "sandbox-feed", signal, async () => ((await sandboxFeedOnce(r)) >= 500 ? 0 : iv.sandbox)),
+      ),
+    );
+  }
+  const nd =
+    deps.neardata === undefined
+      ? neardataClient({ baseUrl: config.neardataUrl, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
+      : deps.neardata;
+  if (nd) {
+    service.addBackground(
+      leader("near-indexer", (signal) =>
+        loop(r, "near-indexer", signal, async () => ((await indexOnce(r, nd, signal)) > 0 ? 0 : iv.indexer)),
+      ),
+    );
+  }
+  const evm = deps.evm ?? evmPools(config, r.profiles, deps.fetch);
+  for (const [chain, rpc] of evm) {
+    const profile = r.profiles.get(chain);
+    if (!profile?.watcher) continue;
+    const every = iv.watcher || profile.watchIntervalS * 1000;
+    service.addBackground(
+      leader(`evm:${chain}`, (signal) =>
+        loop(r, `evm:${chain}`, signal, async () => ((await watchOnce(r, chain, rpc)) >= 500 ? 0 : every)),
+      ),
+    );
+  }
+  const ex =
+    deps.explorer !== undefined
+      ? deps.explorer
+      : r.explorerEnabled && config.explorerToken
+        ? explorerClient({
+            baseUrl: config.explorerBaseUrl,
+            token: config.explorerToken,
+            referral: r.referral,
+            ...(deps.fetch ? { fetch: deps.fetch } : {}),
+          })
+        : null;
+  if (ex) {
+    let turn = 0;
+    service.addBackground(
+      leader("explorer-feed", (signal) => loop(r, "explorer-feed", signal, () => explorerOnce(r, ex, turn++), 10_000)),
+    );
+  }
+  service.onShutdown(async () => {
+    if (!deps.bus) await bus.close();
+  });
+  return { service, rails: r };
+}
