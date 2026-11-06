@@ -2,14 +2,14 @@
 
 > Value movement: route providers (1Click, sandbox, direct-intents), token registry, pricing/FX, executions, tracking (hot poller, Explorer feed, NEAR indexer, destination watchers with amount tags), Tier-A chain verifiers.
 
-| | |
-|---|---|
-| Group | Services |
-| Kind | service |
-| Ships as | image: ghcr.io/nearpay-money/rails · routes /v1/assets; internal /executions, /quotes |
-| Owns | Execution, ProviderObservation, Verification, TokenRegistry, PriceSnapshot |
-| Depends on (published artifacts only) | spec, kit, compliance, sandbox, 1Click, RPCs |
-| First built in | Stage 1 (step 1.2) |
+|                                       |                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Group                                 | Services                                                                                                   |
+| Kind                                  | service                                                                                                    |
+| Ships as                              | image: ghcr.io/nearpay-money/rails · routes /v1/assets; internal /executions, /options, /assets, /evidence |
+| Owns                                  | Execution, ProviderObservation, Verification, TokenRegistry, PriceSnapshot                                 |
+| Depends on (published artifacts only) | spec, kit, compliance, sandbox, 1Click, RPCs                                                               |
+| First built in                        | Stage 1 (step 1.2)                                                                                         |
 
 ## Documentation
 
@@ -29,50 +29,79 @@ This repo stays surgical: design docs live in [`nearpay-brain`](../nearpay-brain
 
 ```
 nearpay-rails/
-├── migrations/
+├── config/chains.yaml        chain profiles: tier, deadlines, finality, evidence timeouts, watchers
 ├── src/
-│   ├── api/
-│   ├── app/
-│   ├── consumers/
-│   ├── domain/
-│   │   ├── execution/
-│   │   ├── pricing/
-│   │   ├── token-registry/
-│   │   └── verification/
-│   ├── infra/
-│   │   ├── bus/
-│   │   ├── clients/
-│   │   └── db/
-│   ├── providers/
-│   │   ├── direct-intents/
-│   │   ├── oneclick/
-│   │   └── sandbox/
-│   ├── trackers/
-│   │   ├── destination-watchers/
-│   │   ├── explorer-feed/
-│   │   ├── hot-poller/
-│   │   └── near-indexer/
-│   ├── verifiers/
-│   │   ├── bitcoin/
-│   │   ├── evm/
-│   │   ├── near/
-│   │   └── solana/
-│   └── workers/
+│   ├── main.ts               process entry: `api` | `tracker` | `feeds` | `migrate` | `healthcheck`
+│   ├── ops.ts                Stage 1 ops CLI entry (`node dist/ops.js <command>`, run inside rails-api)
+│   ├── config.ts             NP_* configuration (secrets from files)
+│   ├── api/                  spec route bindings
+│   ├── app/                  use cases: create executions, apply observations/evidence (ledger), reads, minimums, tokens, wiring
+│   ├── consumers/            identity destination watch-list, sentinel kill switch
+│   ├── domain/               pure: state machine, pricing (par/depeg/dual source), tags, binding, quote integrity, schedule, evidence rules
+│   ├── infra/                Kysely schema, shared call budgets (Valkey), compliance/NEAR/EVM/Explorer clients
+│   ├── providers/            RouteProvider port; 1Click (live) and sandbox (test) adapters
+│   ├── trackers/             hot poller, Explorer feed, NEAR indexer + sandbox feed, EVM destination watchers, attribution
+│   ├── verifiers/            Tier A (EVM receipts, NEAR tx status, simulated chains) and Tier B
+│   ├── ops/                  ops CLI commands
+│   └── workers/              jobs: minimums, orphan tags, kit purge
+├── migrations/               plain SQL (kit tables first, then 0001_rails.sql)
 ├── test/
-│   ├── contract/
-│   ├── fixtures/
-│   │   └── oneclick/
-│   ├── integration/
-│   ├── property/
-│   └── unit/
-└── .github/
-    └── workflows/
+│   ├── unit/ property/       domain (100 % lines), recorded 1Click quote, recorded mainnet blocks; state machine properties
+│   ├── integration/          the real nearpay-sandbox image (test mode end to end), Anvil (EVM), recorded NEAR RPC/neardata, a signed 1Click fake
+│   ├── contract/             route/subject coverage, 1Click wire schemas
+│   ├── fixtures/             recorded provider and mainnet responses (see fixtures/README.md)
+│   └── support/              stack, fakes, Anvil, request builders
+└── Dockerfile                distroless Node 22 image, `node dist/main.js <process>`
 ```
+
+## Commands
+
+| Command                                                                                                  | What it does                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install`                                                                                           | Install (Node 22, pnpm 9); `@nearpay/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it)         |
+| `pnpm test`                                                                                              | Unit and property tests                                                                                                                                     |
+| `pnpm test:integration`                                                                                  | Integration and contract tests: Postgres, NATS, the `nearpay/sandbox:local` image and Anvil in Testcontainers (needs Docker; build the sandbox image first) |
+| `pnpm verify`                                                                                            | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                            |
+| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/rails:local .` | Image (what `up.sh` runs)                                                                                                                                   |
+
+## Configuration
+
+| Variable                                                                                              | Process        | Meaning                                                                                                             |
+| ----------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `NP_DB_URL_FILE`                                                                                      | all            | Database URL (app role; migrator role for `migrate`)                                                                |
+| `NP_IDENTITY_URL`, `NP_SERVICE_CLIENT_SECRET_FILE`                                                    | all            | Service token (client `rails`: `compliance.screen`, `sandbox.use`)                                                  |
+| `NP_COMPLIANCE_URL`                                                                                   | api            | Refund-address screening (1.5 s; unreachable: refuse ≥ `NP_SCREENING_FAIL_CLOSED_USD` = 1,000)                      |
+| `NP_SANDBOX_BASE_URL`, `NP_SANDBOX_SIGNING_PUBKEY`                                                    | all            | Test mode (nearpay-sandbox) and its quote key; unset: test-mode executions are refused                              |
+| `NP_ONECLICK_BASE_URL`, `NP_ONECLICK_API_KEY_FILE`                                                    | all            | 1Click; without a key quotes are unauthenticated (+25 bps)                                                          |
+| `NP_TREASURY_ACCOUNT`                                                                                 | api            | Live appFees / Intents fee recipient (owner-provided). **Unset: live quoting is refused** (`rail_unavailable`)      |
+| `NP_TEST_TREASURY_ACCOUNT`                                                                            | api            | Test-mode fee recipient (`treasury.nearpay.near`, sandbox only)                                                     |
+| `NP_VALKEY_URL`                                                                                       | api, tracker   | Shared 1Click budgets (`NP_ONECLICK_QUOTE_RPS` 5, `NP_ONECLICK_STATUS_RPS` 10); down → half per replica             |
+| `NP_NATS_URL`                                                                                         | feeds          | Events in and out                                                                                                   |
+| `NP_NEAR_RPC_URLS`, `NP_NEARDATA_URL`                                                                 | tracker, feeds | NEAR verifier pool; finalized block stream for the indexer                                                          |
+| `NP_EVM_RPC_URLS_1`, `…_8453`, `…_42161`                                                              | tracker, feeds | EVM pools (public defaults); ≥ 2 URLs enable agreement checks ≥ `NP_AGREEMENT_USD`                                  |
+| `NP_EXPLORER_ENABLED`, `NP_EXPLORER_TOKEN_FILE`                                                       | feeds          | Explorer feed (off until the owner has a partner JWT)                                                               |
+| `NP_AWAITING_SWEEP_S`                                                                                 | tracker        | Unsignalled deposits are polled this often while the Explorer feed is off (30)                                      |
+| `NP_CHAINS_FILE`, `NP_SLIPPAGE_BPS`, `NP_PROVIDER_SPLIT`, `NP_TIER_B_LIMITS`, `NP_PRICING_CURRENCIES` | all            | Profiles, slippage per route class, 1Click appFees split, Tier B limits (USD 2,000 / 20,000 per day), Stage 1 `usd` |
+
+## Behaviour
+
+- **Create (`POST /internal/executions`):** idempotent on `idempotency_key`; live needs the treasury and the kill switch released; tokens from the mode's registry (live: 1Click `/v0/tokens`, test: the sandbox's); route class (`same_asset` / `stable_pair` / `volatile`) picks the fee and slippage; USD stablecoins settle at par (depeg guard ±2 %, price ≤ 5 min old) — non-par settlement needs two agreeing prices and is unavailable in Stage 1; the refund address is screened; the deadline is the chain default capped by the session. A tag makes `base + tag` unique among in-flight executions to the destination (§8.3). The quote is checked before anything is stored: recipient, assets, amount, refund address and types echo what was sent, `EXACT_OUTPUT` delivers the amount, the deposit address is valid, the deadline leaves the chain minimum, the provider signature verifies (1Click SDK), and the **appFees split** — 1Click echoes `[{treasury, fee}]` as `[{treasury, fee/2}, {1Click, fee/2}]` and the signature does not cover appFees, so the entries must total the requested fee with the treasury keeping its share. `intents_transfer` issues the two-transfer requirement with an `np1:` binding instead.
+- **Tracking:** the hot poller (every tracker replica, `SKIP LOCKED` lease) polls 2/4/8/15 s after a signal or deposit, sweeps unsignalled deposits every 30 s while the Explorer feed is off, expires unpaid executions at deadline + 10 min and sweeps them for late refunds for 24 h. Only a _changed_ provider status moves the state; observations older than the stored provider time are recorded, not applied. Unknown statuses, FAILED after a deposit, and contradictions are `held` (alert).
+- **Evidence (INV-2):** `SUCCESS` means `verifying`. Success needs evidence: an EVM watcher or NEAR indexer match (tag or binding; ambiguity attributes nothing), or the verifier on the provider's destination tx (EVM receipt ≤ `finalized`, NEAR tx FINAL, simulated chain in test mode). Tier B chains accept the provider within limits. No evidence by the chain's `verification_timeout_s` → `held`. Trackers are demand-driven: with nothing in flight they make no external call.
+- **Events:** every applied change writes the row, a transition and `evt.rails.execution.updated|settled|refunded|failed|held` in one transaction; the feeds process relays the outbox.
+
+## Ops CLI (Stage 1)
+
+```sh
+docker compose -p nearpay exec rails-api /nodejs/bin/node dist/ops.js execution-show <ex_… | deposit address>
+```
+
+`execution-show` · `flags` · `flag-set quoting_enabled|cross_chain_enabled true|false <reason>` (RB-01) · `tokens-refresh live|test` · `minimums-refresh`.
 
 ## Status
 
-Scaffold only. Implementation starts in **Stage 1 (step 1.2)** (`nearpay-brain/roadmap/development-plan.md`).
+Stage 1 (step 1.2) implemented: every Stage-1 rails route and consumed subject of `@nearpay-internal/spec` 0.1.3. Refund legs, reconciliation runs and the observation archive arrive in Stage 2; Solana and Bitcoin watchers/verifiers and vault event forwarding in Stage 4 (LLD §16).
 
 ## Built with
 
-Libraries are listed here as they are added (hackathon rule Q-005). Code and documentation are written with AI assistance (Claude) under human direction and review.
+TypeScript 5, Node 22, `@nearpay-internal/*` kit (service, db, bus, http, auth, chains, intents, money, ids), `@defuse-protocol/one-click-sdk-typescript` (quote signatures), `ioredis` (Valkey budgets), `yaml`, `bs58`, Kysely + pg, NATS JetStream; tests with Vitest, fast-check, Testcontainers, Anvil (Foundry) and `@noble/curves`. Code and documentation are written with AI assistance (Claude) under human direction and review.

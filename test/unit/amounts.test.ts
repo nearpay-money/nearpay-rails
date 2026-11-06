@@ -1,0 +1,151 @@
+import { rational } from "@nearpay-internal/money";
+import { describe, expect, it } from "vitest";
+import {
+  baseAfterBearer,
+  binding,
+  executionDeadline,
+  intentsFee,
+  parUnitsCeil,
+  tagCandidates,
+  tagSpace,
+} from "../../src/domain/execution/amounts.js";
+import { isExpired, nextPollAt } from "../../src/domain/execution/schedule.js";
+
+describe("settlement amounts (domain-model §3)", () => {
+  it("merchant bearer nets the fee (rounded down); payer bearer keeps the settlement", () => {
+    expect(baseAfterBearer(10_000_000n, 50, "merchant")).toBe(9_950_000n);
+    expect(baseAfterBearer(1_999n, 50, "merchant")).toBe(1_989n); // floor(1999 × 0.995)
+    expect(baseAfterBearer(10_000_000n, 50, "payer")).toBe(10_000_000n);
+  });
+
+  it("intents fee: ceil(amount × bps) with a minimum", () => {
+    expect(intentsFee(10_000_000n, 30, 1_000n)).toBe(30_000n);
+    expect(intentsFee(1_000n, 30, 1_000n)).toBe(1_000n);
+    expect(intentsFee(1_001n, 30, 0n)).toBe(4n); // ceil(3.003)
+    expect(parUnitsCeil(1_000n, 6)).toBe(1_000n);
+    expect(parUnitsCeil(1n, 2)).toBe(1n);
+  });
+});
+
+describe("amount tags (§8.3)", () => {
+  it("tag space is ≤ USD 0.01 and ≤ 9,999 slots; coarse assets are untagged", () => {
+    expect(tagSpace(rational(1n), 6)).toBe(9_999); // USDC: 10,000 → capped
+    expect(tagSpace(rational(2500n), 18)).toBe(9_999); // ETH
+    expect(tagSpace(rational(80_000n), 8)).toBe(0); // BTC: 12 slots < 100 → untagged
+    expect(tagSpace(rational(1n), 4)).toBe(100); // exactly 100 slots
+    expect(tagSpace(rational(1n), 3)).toBe(0);
+    expect(tagSpace(rational(0n), 6)).toBe(0);
+  });
+
+  it("candidates are up to 5 distinct draws within 1..T", () => {
+    const seq = [0, 0.5, 0.5, 0.999999, 0.25];
+    let i = 0;
+    const c = tagCandidates(9_999, () => seq[i++ % seq.length] as number);
+    expect(c).toEqual([1, 5000, 9999, 2500]);
+    expect(tagCandidates(0, Math.random)).toEqual([]);
+    for (let k = 0; k < 200; k++)
+      for (const t of tagCandidates(100, Math.random)) expect(t >= 1 && t <= 100).toBe(true);
+  });
+});
+
+describe("deadlines (§8.1 step 7)", () => {
+  const profile = { defaultDeadlineS: 1800, minDeadlineS: 300 };
+  const now = Date.UTC(2026, 10, 6, 6, 0, 0, 500);
+
+  it("is now + default, capped by the session, in whole seconds", () => {
+    expect(executionDeadline(now, null, profile)).toEqual({
+      ok: true,
+      deadline: new Date(Date.UTC(2026, 10, 6, 6, 30, 0)),
+    });
+    const cap = new Date(now + 600_000);
+    expect(executionDeadline(now, cap, profile)).toEqual({
+      ok: true,
+      deadline: new Date(Date.UTC(2026, 10, 6, 6, 10, 0)),
+    });
+  });
+
+  it("refuses a window shorter than the chain minimum", () => {
+    expect(executionDeadline(now, new Date(now + 299_000), profile)).toEqual({ ok: false });
+    expect(executionDeadline(now, new Date(now - 1), profile)).toEqual({ ok: false });
+  });
+});
+
+describe("binding (§8.1 intents_transfer)", () => {
+  const b = {
+    executionId: "0190f000-0000-7000-8000-000000000001",
+    payTo: "merchant.near",
+    token: "nep141:usdc.near",
+    amount: 10_000n,
+    feeTo: "treasury.nearpay.near",
+    feeAmount: 25n,
+    deadline: new Date(Date.UTC(2026, 10, 6, 7, 0, 0)),
+  };
+  it("is np1 + base58(sha256(JCS(...))), deterministic and sensitive to every field", () => {
+    const x = binding(b);
+    expect(x).toMatch(/^np1:[1-9A-HJ-NP-Za-km-z]{43,44}$/);
+    expect(binding({ ...b })).toBe(x);
+    for (const over of [
+      { amount: 10_001n },
+      { feeAmount: 26n },
+      { payTo: "evil.near" },
+      { feeTo: "x.near" },
+      { token: "nep141:usdt.near" },
+      { executionId: "0190f000-0000-7000-8000-000000000002" },
+      { deadline: new Date(0) },
+    ])
+      expect(binding({ ...b, ...over })).not.toBe(x);
+  });
+});
+
+describe("poll schedule (§8.4)", () => {
+  const base = {
+    state: "deposit_detected" as const,
+    hasSignal: true,
+    pollCount: 0,
+    createdAtMs: 0,
+    deadlineMs: 1_800_000,
+    nowMs: 60_000,
+    explorerEnabled: false,
+    awaitingSweepS: 30,
+  };
+  it("polls fast after a signal: 2, 4, 8, 15, 15 s; 5 min after 2 h", () => {
+    expect([0, 1, 2, 3, 9].map((pollCount) => (nextPollAt({ ...base, pollCount }) as number) - base.nowMs)).toEqual([
+      2_000, 4_000, 8_000, 15_000, 15_000,
+    ]);
+    expect((nextPollAt({ ...base, nowMs: 7_300_000 }) as number) - 7_300_000).toBe(300_000);
+  });
+
+  it("awaiting without a signal: sweeps every 30 s without Explorer, once at deadline + 10 min with it", () => {
+    const a = { ...base, state: "awaiting_deposit" as const, hasSignal: false };
+    expect(nextPollAt(a)).toBe(90_000);
+    expect(nextPollAt({ ...a, explorerEnabled: true })).toBe(1_800_000 + 600_000);
+    expect(nextPollAt({ ...a, nowMs: 2_390_000 })).toBe(2_400_000); // capped at the sweep
+    expect(nextPollAt({ ...a, nowMs: 2_500_000 })).toBe(2_560_000);
+    expect(nextPollAt({ ...a, hasSignal: true })).toBe(62_000);
+  });
+
+  it("verifying and terminal executions are not polled; expired ones until deadline + 24 h; held slowly", () => {
+    for (const state of ["verifying", "succeeded", "refunded", "failed", "quoting"] as const)
+      expect(nextPollAt({ ...base, state })).toBeNull();
+    expect(nextPollAt({ ...base, state: "expired_unpaid" })).toBe(60_000 + 900_000);
+    expect(nextPollAt({ ...base, state: "expired_unpaid", nowMs: 1_800_000 + 86_400_000 })).toBeNull();
+    expect(nextPollAt({ ...base, state: "held" })).toBe(360_000);
+    expect(nextPollAt({ ...base, state: "settling" })).toBe(62_000);
+  });
+
+  it("expires an unpaid execution after deadline + 10 min", () => {
+    const e = {
+      state: "awaiting_deposit" as const,
+      depositSeen: false,
+      providerStatus: "PENDING_DEPOSIT",
+      deadlineMs: 0,
+      nowMs: 600_001,
+    };
+    expect(isExpired(e)).toBe(true);
+    expect(isExpired({ ...e, nowMs: 600_000 })).toBe(false);
+    expect(isExpired({ ...e, depositSeen: true })).toBe(false);
+    expect(isExpired({ ...e, providerStatus: "PROCESSING" })).toBe(false);
+    expect(isExpired({ ...e, providerStatus: null })).toBe(true);
+    expect(isExpired({ ...e, state: "settling" })).toBe(false);
+  });
+});
