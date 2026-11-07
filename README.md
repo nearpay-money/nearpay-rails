@@ -79,9 +79,12 @@ nearpay-rails/
 | `NP_NATS_URL`                                                                                         | feeds          | Events in and out                                                                                                   |
 | `NP_NEAR_RPC_URLS`, `NP_NEARDATA_URL`                                                                 | tracker, feeds | NEAR verifier pool; finalized block stream for the indexer                                                          |
 | `NP_EVM_RPC_URLS_1`, `…_8453`, `…_42161`                                                              | tracker, feeds | EVM pools (public defaults); ≥ 2 URLs enable agreement checks ≥ `NP_AGREEMENT_USD`                                  |
-| `NP_EXPLORER_ENABLED`, `NP_EXPLORER_TOKEN_FILE`                                                       | feeds          | Explorer feed (off until the owner has a partner JWT)                                                               |
+| `NP_EXPLORER_ENABLED`, `NP_EXPLORER_TOKEN_FILE`                                                       | feeds          | Explorer feed (on when the owner's partner JWT file exists; test mode reads the sandbox mirror)                     |
 | `NP_AWAITING_SWEEP_S`                                                                                 | tracker        | Unsignalled deposits are polled this often while the Explorer feed is off (30)                                      |
-| `NP_CHAINS_FILE`, `NP_SLIPPAGE_BPS`, `NP_PROVIDER_SPLIT`, `NP_TIER_B_LIMITS`, `NP_PRICING_CURRENCIES` | all            | Profiles, slippage per route class, 1Click appFees split, Tier B limits (USD 2,000 / 20,000 per day), Stage 1 `usd` |
+| `NP_CHAINS_FILE`, `NP_SLIPPAGE_BPS`, `NP_PROVIDER_SPLIT`, `NP_TIER_B_LIMITS`, `NP_PRICING_CURRENCIES` | all            | Profiles, slippage per route class, 1Click appFees split, Tier B limits (USD 2,000 / 20,000 per day), pricing currencies (default `usd,eur,gbp,chf,jpy,cad,aud`) |
+| `NP_STABLE_PEGS`, `NP_PRICE_SECONDARY_URL`, `NP_PRICE_SECONDARY_IDS`, `NP_PRICE_PRIMARY_MAX_AGE_S`, `NP_PRICE_SECONDARY_MAX_AGE_S` | all | Non-USD stablecoins (`{asset_id: currency}`), CoinGecko keyless base URL, id overrides, price validity (120 s / 300 s) |
+| `NP_FX_URL`, `NP_FX_GRACE_S`, `NP_FX_MAX_AGE_S`, `NP_TEST_FX_RATES` | all | ECB daily XML, staleness bound (next TARGET working day 16:00 CET + 7,200 s, cap 518,400 s), test-mode fixed table |
+| `NP_OBS_ARCHIVE_STORE`, `NP_OBS_ARCHIVE_AFTER_DAYS`, `NP_OBS_ARCHIVE_S3_*` | feeds | Observation archive (`file:<dir>` or `s3://<bucket>/<prefix>`; unset → off), age (90 days), S3 endpoint/region/credentials |
 
 ## Behaviour
 
@@ -100,7 +103,7 @@ docker compose -p nearpay exec rails-api /nodejs/bin/node dist/ops.js execution-
 
 ## Status
 
-Stage 1 (step 1.2) implemented: every Stage-1 rails route and consumed subject of `@nearpay-internal/spec` 0.1.3. Refund legs, reconciliation runs and the observation archive arrive in Stage 2; Solana and Bitcoin watchers/verifiers and vault event forwarding in Stage 4 (LLD §16).
+Stage 1 (step 1.2) and Stage 2 (step 2.2) implemented against `@nearpay/spec` / `@nearpay-internal/spec` 0.2.0 and kit 0.2.0: refund legs (`POST /internal/refund_executions`), pricing/FX (ECB reference rates with the TARGET-calendar bound, CoinGecko keyless secondary prices, exact rationals, `peg_currency` par), `GET /internal/fx-rates`, `/internal/settlement-estimate`, `/internal/executions/{id}/observations`, `/internal/evidence/summary`, the Explorer feed (owner token; sandbox mirror in test mode), the observation archive (Parquet, `file:` or `s3://` store) and the console routes `/ops/executions…`. Solana and Bitcoin watchers/verifiers and vault event forwarding arrive in Stage 4 (LLD §16).
 
 ## Built with
 
