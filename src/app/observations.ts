@@ -37,9 +37,9 @@ export function observationValues(
   };
 }
 
-const hashes = (xs: readonly { hash: string }[] | undefined) => (xs ?? []).map((x) => x.hash).filter(Boolean);
+const hashes = (xs: readonly { hash: string }[] | null | undefined) => (xs ?? []).map((x) => x.hash).filter(Boolean);
 const merge = (a: readonly string[], b: readonly string[]) => [...new Set([...a, ...b])].slice(-20);
-const amount = (s: string | undefined) => (s && /^\d+$/.test(s) ? BigInt(s) : null);
+const amount = (s: string | null | undefined) => (s && /^\d+$/.test(s) ? BigInt(s) : null);
 
 export function depositSeen(cur: ExecutionRow, s?: OneClickStatusResponse): boolean {
   if (cur.deposit_tx_hashes.length > 0) return true;

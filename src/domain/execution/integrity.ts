@@ -46,7 +46,7 @@ export function minTreasuryShare(fee: number, split: ProviderSplit, stableRoute:
 }
 
 export function checkAppFees(
-  echoed: readonly { recipient: string; fee: number }[] | undefined,
+  echoed: readonly { recipient: string; fee: number }[] | null | undefined,
   treasury: string | null,
   feeBps: number,
   split: ProviderSplit,

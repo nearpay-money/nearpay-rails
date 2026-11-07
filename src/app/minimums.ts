@@ -56,7 +56,7 @@ async function withdrawFeeUsdMicros(
     return null;
   }
   const fee = out.response.quote.withdrawFee;
-  if (fee === undefined || !/^\d+$/.test(fee)) return null;
+  if (fee == null || !/^\d+$/.test(fee)) return null;
   return usdMicros(BigInt(fee), pricedToken(d), p);
 }
 

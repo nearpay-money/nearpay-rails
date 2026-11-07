@@ -2,9 +2,9 @@
  * 1Click adapter (lld/rails.md §3, §10; reference/landscape.md §2). Live mode only.
  *
  * Auth: a JWT partner key as `Authorization: Bearer`, any other key as `X-API-Key` (absent: quotes are
- * unauthenticated and cost +25 bps, appFees are still sent). Responses are normalised (./normalize.ts: live
- * 1Click sends nulls the OpenAPI does not declare) and validated against the spec's transcription of the 1Click OpenAPI
- * (`@nearpay-internal/spec` oneclick.ts); quotes are verified with the 1Click SDK
+ * unauthenticated and cost +25 bps, appFees are still sent). Responses are validated as received against the spec's
+ * transcription of the 1Click OpenAPI (`@nearpay-internal/spec` oneclick.ts, which accepts the live nullish shape since
+ * spec 0.2.0); quotes are verified with the 1Click SDK
  * (`verifyQuoteSignature`, SP-01: Ed25519 over base58(sha256(stable-stringify(...))), appFees
  * excluded — rails checks them itself, domain/execution/integrity.ts).
  */
@@ -20,7 +20,7 @@ import {
 import { z } from "zod";
 import type { ProviderToken } from "../../domain/token-registry/registry.js";
 import { assertMode, type QuoteOutcome, type RouteProvider, type StatusOutcome } from "../port.js";
-import { normalizeOneClick, oneClickAuthHeaders } from "./normalize.js";
+import { oneClickAuthHeaders } from "./auth.js";
 
 export interface OneClickOptions {
   readonly baseUrl: string;
@@ -83,7 +83,7 @@ export function oneClickCalls(o: {
         ...(init.body !== undefined ? { body: init.body } : {}),
         timeoutMs: 4_000,
       });
-      const parsed = StatusSchema.safeParse(normalizeOneClick(res.body));
+      const parsed = StatusSchema.safeParse(res.body);
       if (!parsed.success) return { ok: false, kind: "unavailable", detail: "malformed status response" } as const;
       return { ok: true, status: parsed.data, raw: res.body } as const;
     } catch (e) {
@@ -106,7 +106,7 @@ export function oneClickCalls(o: {
           body,
           timeoutMs: 6_000,
         });
-        const parsed = QuoteSchema.safeParse(normalizeOneClick(res.body));
+        const parsed = QuoteSchema.safeParse(res.body);
         if (!parsed.success) return { ok: false, kind: "malformed", detail: parsed.error.message.slice(0, 500) };
         return { ok: true, response: parsed.data, raw: res.body };
       } catch (e) {
