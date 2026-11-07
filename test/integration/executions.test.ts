@@ -71,11 +71,19 @@ describe("route_quote (test mode, sandbox)", () => {
       appFees: [{ recipient: TREASURY, fee: 20 }],
       referral: "nearpay",
     });
-    // …and what it answered: the split, like 1Click
-    expect((row.quote_response as { quoteRequest: { appFees: unknown } }).quoteRequest.appFees).toEqual([
-      { recipient: TREASURY, fee: 10 },
-      { recipient: "sandbox-oneclick-fees.near", fee: 10 },
+    // …and what it answered, stored verbatim: the split, with live 1Click's limitOrderId: null on each item
+    const answered = row.quote_response as {
+      quoteRequest: { appFees: unknown; deadline: string };
+      quote: { deadline: string; timeWhenInactive: string };
+    };
+    expect(answered.quoteRequest.appFees).toEqual([
+      { limitOrderId: null, recipient: TREASURY, fee: 10 },
+      { limitOrderId: null, recipient: "sandbox-oneclick-fees.near", fee: 10 },
     ]);
+    // two deadlines, as live: the payer's is the requested one; the address stays active 3 days longer
+    expect(x.deadline).toBe(answered.quoteRequest.deadline);
+    expect(Date.parse(answered.quote.deadline) - Date.parse(x.deadline)).toBe(3 * 86_400_000);
+    expect(row.time_when_inactive?.toISOString()).toBe(answered.quote.timeWhenInactive);
     const tags = await s.admin.db.selectFrom("amount_tags").selectAll().where("execution_id", "=", id).execute();
     expect(tags).toHaveLength(1);
     expect(tags[0]).toMatchObject({ tag: tag.toString(), released_at: null });
