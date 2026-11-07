@@ -3,7 +3,6 @@
 import type { Selectable } from "@nearpay-internal/db";
 import { fromUuid } from "@nearpay-internal/ids";
 import type { Execution } from "@nearpay-internal/spec";
-import type { PricedToken } from "../domain/pricing/pricing.js";
 import type { ExecutionsTable, TokensTable } from "../infra/db/schema.js";
 
 export type ExecutionRow = Selectable<ExecutionsTable>;
@@ -28,7 +27,8 @@ export function executionView(r: ExecutionRow): Execution {
         }
       : null;
   const intents =
-    r.method === "intents_transfer" && r.binding
+    // payment requirement only; a refund leg's instruction is `refund.transfer`
+    r.method === "intents_transfer" && r.binding && r.kind === "payment"
       ? {
           pay_to: r.recipient,
           token: r.destination_asset_id,
@@ -80,17 +80,9 @@ export function executionView(r: ExecutionRow): Execution {
     terminal_at: isoOrNull(r.terminal_at),
     created_at: iso(r.created_at),
     updated_at: iso(r.updated_at),
+    reference: r.reference ?? null,
+    refund: r.kind === "refund" ? (r.refund ?? null) : null,
   } as Execution;
 }
 
-export function pricedToken(t: TokenRowDb): PricedToken {
-  return {
-    asset_id: t.asset_id,
-    decimals: t.decimals,
-    is_usd_stable: t.is_usd_stable,
-    price_usd: t.price_usd,
-    price_updated_at: t.price_updated_at,
-    secondary_price_usd: t.secondary_price_usd,
-    secondary_updated_at: t.secondary_updated_at,
-  };
-}
+export { pricedToken } from "./pricing.js";

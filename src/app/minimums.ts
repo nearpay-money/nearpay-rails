@@ -10,6 +10,7 @@ import type { OneClickQuoteRequest } from "@nearpay-internal/spec";
 import { unitsForUsdMicros, usdMicros } from "../domain/pricing/pricing.js";
 import { minimumUsdMicros } from "../domain/verification/verification.js";
 import type { Rails } from "./context.js";
+import { policyFor } from "./pricing.js";
 import { enabledTokens, tokenOf } from "./tokens.js";
 import { pricedToken, type TokenRowDb } from "./views.js";
 
@@ -28,7 +29,7 @@ async function withdrawFeeUsdMicros(
 ): Promise<bigint | null> {
   const provider = livemode ? r.providers.live : r.providers.test;
   if (!provider) return null;
-  const p = { ...r.pricing, nowMs: r.now() };
+  const p = await policyFor(r, livemode);
   const amount = unitsForUsdMicros(HUNDRED_USD, pricedToken(d), p);
   const origin = liquidOrigin(await enabledTokens(r, livemode), d);
   if (!amount || !origin) return null;
@@ -50,7 +51,7 @@ async function withdrawFeeUsdMicros(
     referral: r.referral,
     quoteWaitingTimeMs: 3_000,
   };
-  const out = await provider.quote(livemode, req, livemode ? undefined : "0");
+  const out = await provider.quote(livemode, req, livemode ? undefined : { amount: "0" });
   if (!out.ok) {
     r.log.warn({ asset: d.asset_id, kind: out.kind }, "minimum: dry quote failed");
     return null;
@@ -81,7 +82,7 @@ export async function refreshMinimums(r: Rails): Promise<number> {
     const fee = kind === "chain" ? await withdrawFeeUsdMicros(r, g.livemode, d, g.address_norm) : 0n;
     const minUsd = minimumUsdMicros(kind, fee);
     if (minUsd === null) continue;
-    const base = unitsForUsdMicros(minUsd, pricedToken(d), { ...r.pricing, nowMs: r.now() });
+    const base = unitsForUsdMicros(minUsd, pricedToken(d), await policyFor(r, g.livemode));
     if (base === null) continue;
     const values = {
       livemode: g.livemode,

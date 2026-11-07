@@ -29,14 +29,15 @@ import {
   PricingError,
   type PricingPolicy,
   settle,
-  settlementPrice,
   unitsForUsdMicros,
+  unitValue,
   usdMicros,
 } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
 import type { Rails } from "./context.js";
 import { applyChange, emitExecution, lockExecution } from "./ledger.js";
 import { observationValues } from "./observations.js";
+import { policyFor } from "./pricing.js";
 import { tokenOf } from "./tokens.js";
 import { type ExecutionRow, executionView, pricedToken, type TokenRowDb } from "./views.js";
 
@@ -52,25 +53,34 @@ export async function flag(r: Rails, name: string): Promise<boolean> {
   return row?.value ?? true;
 }
 
-function policy(r: Rails): PricingPolicy {
-  return { ...r.pricing, nowMs: r.now() };
+/** Maps a domain pricing failure to its API error (§6 errors of `createExecution`). */
+export function pricingApiError(r: Rails, e: PricingError, amountParam: string): ApiError {
+  if (e.code === "amount_too_small") return ApiError.invalid(e.message, amountParam);
+  if (e.code === "currency_unsupported")
+    return new ApiError("currency_unsupported", { params: { currency: e.subject }, param: "pricing.currency" });
+  if (e.code === "fx_rate_unavailable") {
+    r.log.warn({ currency: e.subject }, "ALERT fx_stale: FX rate unavailable");
+    return new ApiError("fx_rate_unavailable", { params: { currency: e.subject } });
+  }
+  r.metrics.pricingUnavailable(e.subject);
+  return new ApiError("pricing_unavailable", { params: { asset_id: e.subject } });
 }
 
-async function byKey(r: Rails, key: string): Promise<ExecutionRow | undefined> {
+export async function byKey(r: Rails, key: string): Promise<ExecutionRow | undefined> {
   return r.db.selectFrom("executions").selectAll().where("idempotency_key", "=", key).executeTakeFirst();
 }
 
-function replay(row: ExecutionRow, accountId: string, livemode: boolean): Execution {
+export function replay(row: ExecutionRow, accountId: string, livemode: boolean): Execution {
   if (row.account_id !== accountId || row.livemode !== livemode)
     throw new ApiError("idempotency_key_reused", { param: "idempotency_key" });
   return executionView(row);
 }
 
-function unsupported(assetId: string, param: string): ApiError {
+export function unsupported(assetId: string, param: string): ApiError {
   return new ApiError("asset_unsupported", { params: { asset_id: assetId }, param });
 }
 
-function railUnavailable(reason: string): ApiError {
+export function railUnavailable(reason: string): ApiError {
   return new ApiError("rail_unavailable", { params: { reason } });
 }
 
@@ -102,6 +112,17 @@ function pricingOf(b: CreateBody): Pricing {
   const p = b.pricing as { currency: string; amount: number | string; asset_id?: string };
   if (p.currency === "asset") return { currency: "asset", assetId: p.asset_id as string, amount: BigInt(p.amount) };
   return { currency: p.currency, amount: BigInt(p.amount) };
+}
+
+/** `Execution.reference` (spec 0.2.0): the payments object served, echoed from the create request. */
+function referenceOf(b: CreateBody): string | null {
+  if (!b.reference) return null;
+  return JSON.stringify({
+    payment_intent: b.reference.payment_intent,
+    payment_attempt: b.reference.payment_attempt,
+    refund: null,
+    refund_leg: null,
+  });
 }
 
 /** Scenario selector for the sandbox: the payment's pricing amount (sandbox LLD §4). */
@@ -182,6 +203,7 @@ interface Prepared {
   deadline: Date;
   originChain: string;
   amountUsdMicros: bigint | null;
+  policy: PricingPolicy;
 }
 
 async function prepare(r: Rails, b: CreateBody, accountId: string): Promise<Prepared> {
@@ -219,19 +241,20 @@ async function prepare(r: Rails, b: CreateBody, accountId: string): Promise<Prep
   const bps = b.kind === "payment" ? rule.total_bps : 0;
   if (bps > 500) throw ApiError.invalid("fee above 500 bps (1Click appFees cap)", "fee.schedule");
 
-  const p = policy(r);
+  const p = await policyFor(r, lm);
+  const pricing = pricingOf(b);
+  const pricingAsset =
+    pricing.currency === "asset" ? await tokenOf(r, lm, (pricing as { assetId: string }).assetId) : undefined;
   let base: bigint;
   let snapshot: Record<string, unknown>;
   try {
-    const s = settle(pricingOf(b), pricedToken(d), p, () => undefined);
+    const s = settle(pricing, pricedToken(d), p, (id) =>
+      pricingAsset?.enabled && pricingAsset.asset_id === id ? pricedToken(pricingAsset) : undefined,
+    );
     base = baseAfterBearer(s.amount, bps, b.fee.bearer);
     snapshot = s.snapshot as unknown as Record<string, unknown>;
   } catch (e) {
-    if (e instanceof PricingError) {
-      if (e.code === "amount_too_small") throw ApiError.invalid(e.message, "pricing.amount");
-      r.metrics.pricingUnavailable(e.assetId);
-      throw new ApiError("pricing_unavailable", { params: { asset_id: e.assetId } });
-    }
+    if (e instanceof PricingError) throw pricingApiError(r, e, "pricing.amount");
     throw e;
   }
   if (base <= 0n) throw ApiError.invalid("the amount does not cover the fee", "pricing.amount");
@@ -253,6 +276,7 @@ async function prepare(r: Rails, b: CreateBody, accountId: string): Promise<Prep
     deadline: dl.deadline,
     originChain,
     amountUsdMicros: usdMicros(base, pricedToken(d), p),
+    policy: p,
   };
 }
 
@@ -298,7 +322,7 @@ export async function createExecution(r: Rails, b: CreateBody): Promise<Executio
 async function createRouteQuote(r: Rails, b: CreateBody, x: Prepared): Promise<Execution> {
   const lm = b.livemode;
   const provider = (lm ? r.providers.live : r.providers.test) as NonNullable<Rails["providers"]["live"]>;
-  const space = tagSpace(settlementPrice(pricedToken(x.d), policy(r)).usd, x.d.decimals);
+  const space = tagSpace(unitValue(pricedToken(x.d), x.policy).usd, x.d.decimals);
   const tag = await allocateTag(r, x.id, x.key, x.base, space);
   const feeRecipient = lm ? (r.treasury as string) : r.testTreasury;
   const route = x.route as Exclude<RouteClass, "intents_transfer">;
@@ -325,7 +349,17 @@ async function createRouteQuote(r: Rails, b: CreateBody, x: Prepared): Promise<E
   };
   try {
     const started = r.now();
-    const out = await provider.quote(lm, req, lm ? undefined : scenarioAmount(b));
+    const out = await provider.quote(
+      lm,
+      req,
+      lm
+        ? undefined
+        : {
+            amount: scenarioAmount(b),
+            kind: "payment",
+            ...(b.reference ? { group: b.reference.payment_intent } : {}),
+          },
+    );
     const seconds = (r.now() - started) / 1000;
     if (!out.ok) {
       r.metrics.quote(provider.name, out.kind, seconds);
@@ -442,6 +476,7 @@ async function insertRouteQuote(
         version: 1,
         created_at: now,
         updated_at: now,
+        reference: referenceOf(b),
       };
       const row = await tx.insertInto("executions").values(values).returningAll().executeTakeFirstOrThrow();
       const obs = observationValues(x.id, "quote", "PENDING_DEPOSIT", q.raw, null, true);
@@ -481,7 +516,7 @@ async function insertRouteQuote(
 }
 
 async function createIntentsTransfer(r: Rails, b: CreateBody, x: Prepared): Promise<Execution> {
-  const p = policy(r);
+  const p = x.policy;
   const rule = b.fee.schedule.rules.intents_transfer;
   const minFee =
     rule.min_fee_usd_micros > 0 ? unitsForUsdMicros(BigInt(rule.min_fee_usd_micros), pricedToken(x.d), p) : 0n;
@@ -533,6 +568,7 @@ async function createIntentsTransfer(r: Rails, b: CreateBody, x: Prepared): Prom
           deadline: x.deadline,
           // no provider to poll: one check after the deadline expires it (§5 "Expiry")
           next_poll_at: new Date(x.deadline.getTime() + 10 * 60_000),
+          reference: referenceOf(b),
           version: 1,
           created_at: now,
           updated_at: now,

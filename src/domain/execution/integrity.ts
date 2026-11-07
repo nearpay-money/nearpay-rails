@@ -4,7 +4,8 @@
  * Every quote is checked against the request NearPay sent before any deposit address is shown:
  * the echoed request must carry the same recipient, assets, amount, refund address and types; an
  * `EXACT_OUTPUT` quote must deliver exactly the requested amount; the deposit address must be valid
- * for the origin; and the deadline must leave the chain minimum.
+ * for the origin; and the deadline must leave the chain minimum. An `EXACT_INPUT` quote (refund legs) must take
+ * exactly the requested amount in and promise a positive `minAmountOut` ≤ `amountOut`.
  *
  * `appFees` are not covered by the provider signature (the 1Click SDK's signed request sets
  * `appFees: undefined`), so they are checked here. 1Click echoes them **split** with its own fee
@@ -88,6 +89,13 @@ export function checkQuote(i: IntegrityInput): IntegrityResult {
   const q = i.response.quote;
   if (i.sent.swapType === "EXACT_OUTPUT" && q.amountOut !== i.sent.amount)
     failures.push(`amountOut ${q.amountOut} != requested ${i.sent.amount}`);
+  // EXACT_INPUT (refund legs, Stage 2): the sender deposits exactly the requested amount; the recipient's floor is
+  // minAmountOut, which must be positive and not above the quoted amountOut
+  if (i.sent.swapType === "EXACT_INPUT") {
+    if (q.amountIn !== i.sent.amount) failures.push(`amountIn ${q.amountIn} != requested ${i.sent.amount}`);
+    if (!/^\d+$/.test(q.minAmountOut) || BigInt(q.minAmountOut) <= 0n) failures.push("minAmountOut is zero");
+    else if (BigInt(q.minAmountOut) > BigInt(q.amountOut)) failures.push("minAmountOut exceeds amountOut");
+  }
   if (BigInt(q.minAmountIn) > BigInt(q.amountIn)) failures.push("minAmountIn exceeds amountIn");
   if (BigInt(q.amountIn) <= 0n) failures.push("amountIn is zero");
   if (!q.depositAddress) failures.push("no deposit address");

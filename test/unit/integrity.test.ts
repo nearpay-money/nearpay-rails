@@ -120,6 +120,28 @@ describe("checkQuote", () => {
     expect(checkQuote(input())).toEqual({ ok: true });
   });
 
+  it("EXACT_INPUT (refund legs): exactly the requested amount in, positive minAmountOut ≤ amountOut", () => {
+    const q = live.quote;
+    const exin = (quote: Partial<typeof q>, amount = q.amountIn) =>
+      checkQuote(
+        input({
+          sent: { ...sent, dry: false, swapType: "EXACT_INPUT", amount },
+          response: {
+            ...live,
+            quoteRequest: { ...live.quoteRequest, swapType: "EXACT_INPUT", amount },
+            quote: { ...q, ...quote },
+          },
+        }),
+      );
+    expect(exin({})).toEqual({ ok: true });
+    expect(exin({}, (BigInt(q.amountIn) + 1n).toString())).toMatchObject({ ok: false });
+    expect(exin({ minAmountOut: "0" })).toEqual({ ok: false, failures: ["minAmountOut is zero"] });
+    expect(exin({ minAmountOut: (BigInt(q.amountOut) + 1n).toString() })).toEqual({
+      ok: false,
+      failures: ["minAmountOut exceeds amountOut"],
+    });
+  });
+
   it.each([
     ["recipient", { recipient: "evil.near" }],
     ["refundTo", { refundTo: "0x0000000000000000000000000000000000000001" }],

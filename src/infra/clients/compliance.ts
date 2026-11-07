@@ -19,6 +19,8 @@ export interface Screening {
     accountId: string;
     livemode: boolean;
     amountUsdMicros: bigint | null;
+    /** Why (`payment` default; `refund` for refund-leg recipients). */
+    context?: "payment" | "refund";
   }): Promise<ScreeningOutcome>;
 }
 
@@ -47,7 +49,7 @@ export function complianceScreening(o: {
             subject_type: i.subjectType,
             ...(i.chain && i.subjectType === "address" ? { chain: i.chain } : {}),
             subject: i.subject,
-            context: "payment",
+            context: i.context ?? "payment",
             account_id: i.accountId,
             livemode: i.livemode,
             ...(micros !== null && micros <= BigInt(Number.MAX_SAFE_INTEGER)

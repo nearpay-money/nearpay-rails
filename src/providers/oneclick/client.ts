@@ -18,6 +18,7 @@ import {
   OneClickStatusResponse as StatusSchema,
 } from "@nearpay-internal/spec";
 import { z } from "zod";
+import { parseJsonDecimals } from "../../domain/pricing/ratio.js";
 import type { ProviderToken } from "../../domain/token-registry/registry.js";
 import { assertMode, type QuoteOutcome, type RouteProvider, type StatusOutcome } from "../port.js";
 import { oneClickAuthHeaders } from "./auth.js";
@@ -36,30 +37,50 @@ export interface OneClickOptions {
 
 const TokenList = z.array(z.unknown());
 
+/**
+ * `/v0/tokens`: the body as text, so every `price` keeps its exact source digits (`parseJsonDecimals`, §8.2: feed
+ * numbers never pass through a float). An already-parsed body (tests) falls back to the number's shortest decimal.
+ */
 export function parseTokens(body: unknown): ProviderToken[] {
-  const list = TokenList.parse(body);
+  const text = typeof body === "string" ? body : null;
+  const list = TokenList.parse(text === null ? body : JSON.parse(text));
+  const exact = text === null ? null : (parseJsonDecimals(text) as { price?: unknown }[]);
   const out: ProviderToken[] = [];
-  for (const item of list) {
+  list.forEach((item, i) => {
     const t = OneClickToken.safeParse(item);
-    if (!t.success) continue;
+    if (!t.success) return;
     const at = Date.parse(t.data.priceUpdatedAt);
+    const src = exact?.[i]?.price;
+    const priceText = typeof src === "string" ? src : String(t.data.price);
     out.push({
       assetId: t.data.assetId,
       decimals: t.data.decimals,
       blockchain: t.data.blockchain,
       symbol: t.data.symbol,
-      // JSON numbers become their shortest round-trip decimal string; parsed exactly downstream
-      priceUsd: Number.isFinite(t.data.price) && t.data.price > 0 ? String(t.data.price) : null,
+      priceUsd: Number.isFinite(t.data.price) && t.data.price > 0 ? priceText : null,
       priceUpdatedAt: Number.isFinite(at) ? new Date(at) : null,
       contractAddress: t.data.contractAddress ?? null,
+      coingeckoId: t.data.coingeckoId ?? null,
     });
-  }
+  });
   return out;
+}
+
+/** A fetch whose responses never look like JSON to the HTTP client, so the body stays the raw text. */
+export function textFetch(f: typeof fetch = fetch): typeof fetch {
+  return async (input, init) => {
+    const res = await f(input, init);
+    const headers = new Headers(res.headers);
+    headers.set("content-type", "text/plain; charset=utf-8");
+    return new Response(await res.text(), { status: res.status, statusText: res.statusText, headers });
+  };
 }
 
 /** Shared HTTP behaviour of both 1Click-compatible adapters. */
 export function oneClickCalls(o: {
   client: HttpClient;
+  /** Client whose bodies stay text (`textFetch`) for `/v0/tokens`; default `client`. */
+  textClient?: HttpClient;
   headers: Record<string, string>;
   takeQuote: () => Promise<boolean>;
   takeStatus: () => Promise<boolean>;
@@ -93,7 +114,12 @@ export function oneClickCalls(o: {
   }
   return {
     async tokens(): Promise<ProviderToken[]> {
-      const res = await o.client.request({ method: "GET", path: "/v0/tokens", headers: o.headers, timeoutMs: 5_000 });
+      const res = await (o.textClient ?? o.client).request({
+        method: "GET",
+        path: "/v0/tokens",
+        headers: o.headers,
+        timeoutMs: 5_000,
+      });
       return parseTokens(res.body);
     },
     async quote(body: unknown): Promise<QuoteOutcome> {
@@ -151,8 +177,17 @@ export function oneClickProvider(o: OneClickOptions): RouteProvider {
     ...(o.fetch ? { fetch: o.fetch } : {}),
     ...(o.onResult ? { onResult: o.onResult } : {}),
   });
+  const textClient = httpClient({
+    target: "oneclick",
+    baseUrl: o.baseUrl,
+    timeoutMs: 5_000,
+    attempts: 1,
+    breaker: false,
+    fetch: textFetch(o.fetch),
+  });
   const calls = oneClickCalls({
     client,
+    textClient,
     headers: oneClickAuthHeaders(o.apiKey),
     takeQuote: o.takeQuote ?? always,
     takeStatus: o.takeStatus ?? always,
