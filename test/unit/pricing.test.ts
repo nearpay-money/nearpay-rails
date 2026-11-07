@@ -3,155 +3,241 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_POLICY,
   dualPrice,
+  type FxObs,
+  fxRate,
+  fxUsable,
   indicativeUsd,
   type PricedToken,
   PricingError,
+  type PricingPolicy,
   parCheck,
+  pricesOf,
   settle,
   settlementPrice,
   unitsForUsdMicros,
+  unitValue,
   usdMicros,
+  usdValue,
 } from "../../src/domain/pricing/pricing.js";
+import { parseExactDecimal } from "../../src/domain/pricing/ratio.js";
 
-const NOW = Date.UTC(2026, 10, 6, 6, 0, 0);
-const p = { ...DEFAULT_POLICY, nowMs: NOW };
+const NOW = Date.parse("2026-11-06T12:00:00Z");
 const ago = (s: number) => new Date(NOW - s * 1000);
+const obs = (v: string, ageS = 10, source = "oneclick") => ({
+  value: parseExactDecimal(v),
+  asOf: ago(ageS),
+  fetchedAt: ago(ageS),
+  source,
+});
+const fx = (currency: string, v: string, validUntil: Date | null = new Date(NOW + 3_600_000)): FxObs => ({
+  currency,
+  value: parseExactDecimal(v),
+  source: "ecb",
+  referenceDate: "2026-11-05",
+  asOf: ago(3600),
+  fetchedAt: ago(60),
+  validUntil,
+});
+const FX = new Map<string, FxObs>([
+  ["eur", fx("eur", "1.08")],
+  ["jpy", fx("jpy", "0.0067")],
+  ["gbp", fx("gbp", "1.27", ago(1))], // stale
+]);
+const p: PricingPolicy = {
+  ...DEFAULT_POLICY,
+  currencies: new Set(["usd", "eur", "jpy", "gbp"]),
+  nowMs: NOW,
+  fx: (c) => FX.get(c),
+};
 
-const token = (over: Partial<PricedToken> = {}): PricedToken => ({
-  asset_id: "nep141:usdc.near",
+const usdc = (over: Partial<PricedToken> = {}): PricedToken => ({
+  asset_id: "nep141:usdc",
   decimals: 6,
-  is_usd_stable: true,
-  price_usd: "0.999442",
-  price_updated_at: ago(50),
-  secondary_price_usd: null,
-  secondary_updated_at: null,
+  peg_currency: "usd",
+  primary: obs("0.9995"),
+  secondary: null,
   ...over,
 });
-const ETH = token({ asset_id: "nep141:eth.near", decimals: 18, is_usd_stable: false, price_usd: "2500" });
-
-describe("par policy and depeg guard (§8.2)", () => {
-  it("settles a fresh, pegged stablecoin at par", () => {
-    expect(parCheck(token(), p)).toEqual({ ok: true });
-    expect(settlementPrice(token(), p)).toEqual({ usd: rational(1n), par: true });
-  });
-
-  it("guards the ±2 % band (inclusive) and freshness", () => {
-    expect(parCheck(token({ price_usd: "0.98" }), p).ok).toBe(true);
-    expect(parCheck(token({ price_usd: "1.02" }), p).ok).toBe(true);
-    expect(parCheck(token({ price_usd: "0.979999" }), p)).toEqual({ ok: false, reason: "depeg" });
-    expect(parCheck(token({ price_usd: "1.0201" }), p)).toEqual({ ok: false, reason: "depeg" });
-    expect(parCheck(token({ price_updated_at: ago(301) }), p)).toEqual({ ok: false, reason: "stale" });
-    expect(parCheck(token({ price_updated_at: null }), p)).toEqual({ ok: false, reason: "stale" });
-    expect(parCheck(token({ price_updated_at: new Date(NOW + 120_000) }), p)).toEqual({ ok: false, reason: "stale" });
-    expect(parCheck(token({ price_usd: null }), p)).toEqual({ ok: false, reason: "stale" });
-    expect(parCheck(token({ price_usd: "garbage" }), p)).toEqual({ ok: false, reason: "stale" });
-    expect(parCheck(token({ price_usd: "0" }), p)).toEqual({ ok: false, reason: "stale" });
-    expect(parCheck(ETH, p)).toEqual({ ok: false, reason: "not_stable" });
-  });
+const eurc = (over: Partial<PricedToken> = {}): PricedToken => ({
+  asset_id: "nep141:eurc",
+  decimals: 6,
+  peg_currency: "eur",
+  primary: obs("1.081"),
+  secondary: obs("1.079", 30, "coingecko"),
+  ...over,
+});
+const eth = (over: Partial<PricedToken> = {}): PricedToken => ({
+  asset_id: "nep141:eth",
+  decimals: 18,
+  peg_currency: null,
+  primary: obs("2500"),
+  secondary: obs("2520", 100, "coingecko"),
+  ...over,
 });
 
-describe("dual-source price (non-par)", () => {
-  const both = (a: string, b: string, ageA = 10, ageB = 10) =>
-    token({
-      ...ETH,
-      price_usd: a,
-      price_updated_at: ago(ageA),
-      secondary_price_usd: b,
-      secondary_updated_at: ago(ageB),
-    });
-
-  it("needs two fresh prices within 1.5 %", () => {
-    expect(dualPrice(both("2500", "2520"), p)).toEqual({ ok: true, usd: rational(2500n) });
-    expect(dualPrice(both("2500", "2540"), p)).toEqual({ ok: false, reason: "disagree" });
-    expect(dualPrice(both("2500", "2500", 61), p)).toEqual({ ok: false, reason: "stale" });
-    expect(dualPrice(both("2500", "2500", 10, 61), p)).toEqual({ ok: false, reason: "stale" });
-    expect(dualPrice(ETH, p)).toEqual({ ok: false, reason: "missing" });
-  });
-
-  it("Stage 1 has no secondary source: non-par settlement is pricing_unavailable", () => {
-    expect(() => settle({ currency: "usd", amount: 1000n }, ETH, p, () => undefined)).toThrow(PricingError);
+describe("fx(c) and the staleness bound", () => {
+  it("usd is exactly one without a source; others need a stored rate inside valid_until", () => {
+    expect(fxRate("usd", p).value).toEqual(rational(1n));
+    expect(fxRate("eur", p).value).toEqual(parseExactDecimal("1.08"));
+    expect(() => fxRate("gbp", p)).toThrow(PricingError);
+    expect(() => fxRate("chf", p)).toThrow(/no FX rate/);
     try {
-      settlementPrice(ETH, p);
+      fxRate("gbp", p);
     } catch (e) {
-      expect(e).toMatchObject({ code: "pricing_unavailable", assetId: "nep141:eth.near" });
+      expect((e as PricingError).code).toBe("fx_rate_unavailable");
+      expect((e as PricingError).subject).toBe("gbp");
+      expect((e as PricingError).assetId).toBe("gbp");
     }
-  });
-
-  it("settles a non-par asset through the dual price, rounded down", () => {
-    const eth = both("2500", "2510");
-    const s = settle({ currency: "usd", amount: 2501n }, eth, p, () => undefined); // USD 25.01
-    expect(s.amount).toBe(10_004_000_000_000_000n); // 25.01 / 2500 ETH
-    expect(s.par).toBe(false);
-    const odd = settle({ currency: "usd", amount: 1n }, both("3", "3"), p, () => undefined);
-    expect(odd.amount).toBe(3_333_333_333_333_333n); // floor(0.01 / 3 × 10^18)
+    expect(fxUsable(FX.get("eur"), NOW)).toBe(true);
+    expect(fxUsable(FX.get("gbp"), NOW)).toBe(false);
+    expect(fxUsable(undefined, NOW)).toBe(false);
+    expect(fxUsable(fx("x", "1", null), NOW)).toBe(true);
+    expect(() => fxRate("zero", { ...p, fx: () => fx("zero", "0") })).toThrow(PricingError);
   });
 });
 
-describe("settle()", () => {
-  it("fiat usd at par is exact: minor units × 10^(decimals − 2)", () => {
-    const s = settle({ currency: "usd", amount: 1999n }, token(), p, () => undefined);
-    expect(s.amount).toBe(19_990_000n);
+describe("par policy (depeg guard)", () => {
+  it("USD stablecoins at par within ±2 % of 1 with a primary ≤ 5 min old", () => {
+    expect(parCheck(usdc(), p).ok).toBe(true);
+    expect(settlementPrice(usdc(), p)).toEqual({ usd: rational(1n), par: true });
+    expect(parCheck(usdc({ primary: obs("0.98") }), p).ok).toBe(true);
+    expect(parCheck(usdc({ primary: obs("1.02") }), p).ok).toBe(true);
+    expect(parCheck(usdc({ primary: obs("0.979999") }), p)).toEqual({ ok: false, reason: "depeg" });
+    expect(parCheck(usdc({ primary: obs("1.0201") }), p)).toEqual({ ok: false, reason: "depeg" });
+    expect(parCheck(usdc({ primary: obs("1", 301) }), p)).toEqual({ ok: false, reason: "stale" });
+    expect(parCheck(usdc({ primary: null }), p)).toEqual({ ok: false, reason: "stale" });
+    expect(parCheck(usdc({ primary: { ...obs("1"), asOf: new Date(NOW + 120_000) } }), p)).toEqual({
+      ok: false,
+      reason: "stale",
+    });
+    expect(parCheck(eth(), p)).toEqual({ ok: false, reason: "not_stable" });
+  });
+
+  it("a valid secondary must pass the same band; a stale one is ignored", () => {
+    expect(parCheck(usdc({ secondary: obs("0.97", 10, "coingecko") }), p)).toEqual({ ok: false, reason: "depeg" });
+    expect(parCheck(usdc({ secondary: obs("0.97", 301, "coingecko") }), p).ok).toBe(true);
+  });
+
+  it("non-USD pegs compare with fx(peg); no usable rate disables par", () => {
+    expect(parCheck(eurc(), p).ok).toBe(true);
+    expect(parCheck(eurc({ primary: obs("1.11") }), p)).toEqual({ ok: false, reason: "depeg" });
+    expect(parCheck(eurc({ peg_currency: "gbp" }), p)).toEqual({ ok: false, reason: "fx_unavailable" });
+    expect(unitValue(eurc(), p)).toMatchObject({ par: true, parCurrency: "eur", usd: parseExactDecimal("1.08") });
+    expect(unitValue(eurc(), p).rates.map((r) => r.base)).toEqual(["eur"]);
+  });
+});
+
+describe("dual-source price", () => {
+  it("both valid (primary ≤ 120 s, secondary ≤ 300 s) and within 1.5 % → primary", () => {
+    const d = dualPrice(eth(), p);
+    expect(d.ok && d.usd).toEqual(rational(2500n));
+    expect(dualPrice(eth({ secondary: obs("2540") }), p)).toEqual({ ok: false, reason: "disagree" });
+    expect(dualPrice(eth({ primary: obs("2500", 121) }), p)).toEqual({ ok: false, reason: "stale" });
+    expect(dualPrice(eth({ secondary: obs("2500", 301) }), p)).toEqual({ ok: false, reason: "stale" });
+    expect(dualPrice(eth({ secondary: obs("2500", 299) }), p).ok).toBe(true);
+    expect(dualPrice(eth({ secondary: null }), p)).toEqual({ ok: false, reason: "missing" });
+    expect(dualPrice(eth({ primary: obs("0") }), p)).toEqual({ ok: false, reason: "missing" });
+  });
+
+  it("no reliable price → pricing_unavailable", () => {
+    expect(() => unitValue(eth({ secondary: null }), p)).toThrow(PricingError);
+    const u = unitValue(eth(), p);
+    expect(u.par).toBe(false);
+    expect(u.rates.map((r) => `${r.role}:${r.source}`)).toEqual(["primary:oneclick", "secondary:coingecko"]);
+  });
+});
+
+describe("settle (§8.2)", () => {
+  const none = () => undefined;
+  it("USD pricing settles USD stablecoins at par (no FX, no secondary)", () => {
+    const s = settle({ currency: "usd", amount: 1234n }, usdc(), p, none);
+    expect(s.amount).toBe(12_340_000n);
     expect(s.par).toBe(true);
-    expect(s.snapshot).toEqual({
-      primary_usd: "0.999442",
-      secondary_usd: null,
-      fx: null,
+    expect(s.snapshot).toMatchObject({ currency: "usd", par_currency: "usd", fx: null, rates: [] });
+  });
+
+  it("EUR pricing into EURC at par; into USDC via the EUR rate; into ETH via both prices", () => {
+    expect(settle({ currency: "eur", amount: 1000n }, eurc(), p, none)).toMatchObject({
+      amount: 10_000_000n,
       par: true,
-      as_of: new Date(NOW).toISOString(),
     });
+    const u = settle({ currency: "eur", amount: 1000n }, usdc(), p, none);
+    expect(u.amount).toBe(10_800_000n); // 10.00 EUR × 1.08
+    expect(u.snapshot.fx).toBe("1.08");
+    expect(u.snapshot.rates.map((r) => r.base)).toEqual(["eur"]);
+    const e = settle({ currency: "eur", amount: 250_000n }, eth(), p, none); // 2,500 EUR = 2,700 USD = 1.08 ETH
+    expect(e.amount).toBe(1_080_000_000_000_000_000n);
+    expect(e.par).toBe(false);
+    expect(e.snapshot.rates.map((r) => `${r.kind}:${r.base}`)).toEqual([
+      "fx:eur",
+      "price:nep141:eth",
+      "price:nep141:eth",
+    ]);
   });
 
-  it("refuses currencies that are not enabled (Stage 1: usd only)", () => {
-    expect(() => settle({ currency: "eur", amount: 100n }, token(), p, () => undefined)).toThrow(/not enabled/);
+  it("JPY (exponent 0) and floor rounding", () => {
+    const s = settle({ currency: "jpy", amount: 1000n }, usdc(), p, none); // 1000 × 0.0067 = 6.7 USD
+    expect(s.amount).toBe(6_700_000n);
+    const tiny = settle({ currency: "usd", amount: 1n }, eth(), p, none); // 0.01 / 2500 ETH
+    expect(tiny.amount).toBe(4_000_000_000_000n);
   });
 
-  it("asset pricing: same asset passes through; another asset converts through both prices", () => {
-    expect(
-      settle({ currency: "asset", assetId: "nep141:usdc.near", amount: 123n }, token(), p, () => undefined).amount,
-    ).toBe(123n);
-    const usdt = token({ asset_id: "nep141:usdt.near" });
-    const s = settle({ currency: "asset", assetId: "nep141:usdt.near", amount: 5_000_000n }, token(), p, (id) =>
-      id === usdt.asset_id ? usdt : undefined,
+  it("refuses unaccepted currencies, stale FX, no price, sub-unit amounts", () => {
+    const code = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        return (e as PricingError).code;
+      }
+      return null;
+    };
+    expect(code(() => settle({ currency: "chf", amount: 100n }, usdc(), p, none))).toBe("currency_unsupported");
+    expect(code(() => settle({ currency: "chf", amount: 100n }, { ...eurc(), peg_currency: "chf" }, p, none))).toBe(
+      "currency_unsupported",
     );
-    expect(s).toMatchObject({ amount: 5_000_000n, par: true });
-    expect(() =>
-      settle({ currency: "asset", assetId: "nep141:x.near", amount: 1n }, token(), p, () => undefined),
-    ).toThrow(/not priced/);
+    expect(code(() => settle({ currency: "gbp", amount: 100n }, usdc(), p, none))).toBe("fx_rate_unavailable");
+    expect(code(() => settle({ currency: "usd", amount: 100n }, eth({ secondary: null }), p, none))).toBe(
+      "pricing_unavailable",
+    );
+    const big: PricedToken = { ...eth(), decimals: 0, primary: obs("1000000"), secondary: obs("1000000") };
+    expect(code(() => settle({ currency: "usd", amount: 1n }, big, p, none))).toBe("amount_too_small");
   });
 
-  it("rejects amounts below one base unit", () => {
-    const btc = token({
-      ...ETH,
-      decimals: 0,
-      price_usd: "80000",
-      secondary_price_usd: "80000",
-      price_updated_at: ago(1),
-      secondary_updated_at: ago(1),
-    });
-    expect(() => settle({ currency: "usd", amount: 100n }, btc, p, () => undefined)).toThrow(
-      expect.objectContaining({ code: "amount_too_small" }),
+  it("asset pricing: same asset passes through; another asset via its unit value", () => {
+    expect(settle({ currency: "asset", assetId: "nep141:eth", amount: 5n }, eth(), p, none).amount).toBe(5n);
+    const s = settle(
+      { currency: "asset", assetId: "nep141:usdc", amount: 2_000_000n },
+      usdc({ asset_id: "x" }),
+      p,
+      (id) => (id === "nep141:usdc" ? usdc() : undefined),
     );
+    expect(s).toMatchObject({ amount: 2_000_000n, par: true });
+    expect(() => settle({ currency: "asset", assetId: "nep141:none", amount: 1n }, usdc(), p, none)).toThrow(
+      PricingError,
+    );
+    const v = usdValue({ currency: "asset", assetId: "nep141:eth", amount: 10n ** 18n }, p, () => eth());
+    expect(v.usd).toEqual(rational(2500n));
+  });
+
+  it("par disabled (depeg) falls back to the dual-source price", () => {
+    const depegged = usdc({ primary: obs("0.95"), secondary: obs("0.951", 10, "coingecko") });
+    const s = settle({ currency: "usd", amount: 100n }, depegged, p, none);
+    expect(s.par).toBe(false);
+    expect(s.amount).toBe(1_052_631n); // floor(1 / 0.95 × 10^6)
   });
 });
 
-describe("USD conversions", () => {
+describe("micros helpers", () => {
   it("usdMicros floors; unitsForUsdMicros ceils; both null without a price", () => {
-    expect(usdMicros(1_234_567n, token(), p)).toBe(1_234_567n);
-    expect(unitsForUsdMicros(1_000_000n, token(), p)).toBe(1_000_000n);
-    const t18 = token({ decimals: 18 });
-    expect(unitsForUsdMicros(1n, t18, p)).toBe(1_000_000_000_000n);
-    const weird = token({
-      ...ETH,
-      price_usd: "3",
-      secondary_price_usd: "3",
-      price_updated_at: ago(1),
-      secondary_updated_at: ago(1),
-      decimals: 0,
-    });
+    expect(usdMicros(1_234_567n, usdc(), p)).toBe(1_234_567n);
+    expect(unitsForUsdMicros(1_000_000n, usdc(), p)).toBe(1_000_000n);
+    const weird: PricedToken = { ...eth(), decimals: 0, primary: obs("3"), secondary: obs("3") };
     expect(unitsForUsdMicros(1_000_000n, weird, p)).toBe(1n); // ceil(1/3)
-    expect(usdMicros(1n, ETH, p)).toBeNull();
-    expect(unitsForUsdMicros(1n, ETH, p)).toBeNull();
-    expect(indicativeUsd(ETH)).toEqual(rational(2500n));
-    expect(indicativeUsd(token({ price_usd: null }))).toBeNull();
+    expect(usdMicros(1n, eth({ secondary: null }), p)).toBeNull();
+    expect(unitsForUsdMicros(1n, eth({ secondary: null }), p)).toBeNull();
+    expect(indicativeUsd(eth())).toEqual(rational(2500n));
+    expect(indicativeUsd(usdc({ primary: null }))).toBeNull();
+    expect(pricesOf(eth(), p).map((r) => r.role)).toEqual(["primary", "secondary"]);
+    expect(pricesOf(eth({ primary: null, secondary: null }), p)).toEqual([]);
   });
 });

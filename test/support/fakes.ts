@@ -109,6 +109,9 @@ export async function fakeOneClick(): Promise<FakeOneClick> {
         { recipient: "5880ad2b362620fadf759cbceb1cd5737ce8c6ed7fb8e9942881e6731f9247dd", fee: Math.ceil(f.fee / 2) },
       ]);
       const amount = BigInt(q.amount as string);
+      // EXACT_INPUT (refund legs): exactly `amount` in, 1 % route cost out, minAmountOut 0.5 % below
+      const exactIn = q.swapType === "EXACT_INPUT";
+      const out = exactIn ? (amount * 9_900n) / 10_000n : amount;
       const address =
         q.depositType === "INTENTS"
           ? `dep-${randomBytes(8).toString("hex")}.near`
@@ -125,14 +128,14 @@ export async function fakeOneClick(): Promise<FakeOneClick> {
         },
         quote: {
           ...(q.dry ? {} : { depositAddress: address, deadline: q.deadline, timeWhenInactive: q.deadline }),
-          amountIn: ((amount * 10_100n) / 10_000n).toString(),
+          amountIn: (exactIn ? amount : (amount * 10_100n) / 10_000n).toString(),
           amountInFormatted: "x",
           amountInUsd: "x",
           minAmountIn: amount.toString(),
-          amountOut: amount.toString(),
+          amountOut: out.toString(),
           amountOutFormatted: "x",
           amountOutUsd: "x",
-          minAmountOut: amount.toString(),
+          minAmountOut: (exactIn ? (out * 9_950n) / 10_000n : amount).toString(),
           timeEstimate: 20,
           refundFee: "0",
           withdrawFee: "20000",

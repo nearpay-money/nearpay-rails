@@ -1,6 +1,6 @@
 /** Configuration (lld/rails.md §11, foundations §13). */
 import { NearAccountId } from "@nearpay/spec";
-import { baseConfigShape, flag, list, loadConfig, secret, url } from "@nearpay-internal/service";
+import { baseConfigShape, list, loadConfig, secret, url } from "@nearpay-internal/service";
 import { z } from "zod";
 
 const json = <T extends z.ZodType>(schema: T, fallback: string) =>
@@ -60,7 +60,41 @@ const shared = {
   ),
   oneclickQuoteRps: z.coerce.number().min(0.1).max(1000).default(5),
   oneclickStatusRps: z.coerce.number().min(0.1).max(1000).default(10),
-  pricingCurrencies: list(z.string().regex(/^[a-z]{3}$/)).default(["usd"]),
+  /** Accepted fiat pricing currencies (Stage 2 default; each must be `usd` or an ECB currency). */
+  pricingCurrencies: list(z.string().regex(/^[a-z]{3}$/)).default(["usd", "eur", "gbp", "chf", "jpy", "cad", "aud"]),
+  /** Non-USD stablecoins settled at par with their currency (`{asset_id: currency}`, e.g. EURC → eur). */
+  stablePegs: json(z.record(z.string(), z.string().regex(/^[a-z]{3}$/)), "{}"),
+  /** Secondary price feed (CoinGecko keyless; `NP_PRICE_SECONDARY_KEY_FILE` is not used in v1). */
+  priceSecondaryUrl: url(["https:", "http:"]).default("https://api.coingecko.com/api/v3"),
+  /** `{asset_id: coingecko id}` overrides of the 1Click `coingeckoId`. */
+  priceSecondaryIds: json(z.record(z.string(), z.string().min(1).max(128)), "{}"),
+  pricePrimaryMaxAgeS: z.coerce.number().int().min(10).max(3600).default(120),
+  priceSecondaryMaxAgeS: z.coerce.number().int().min(10).max(3600).default(300),
+  /** ECB daily reference rates (FX). */
+  fxUrl: url(["https:", "http:"]).default("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"),
+  fxGraceS: z.coerce.number().int().min(0).max(86_400).default(7200),
+  fxMaxAgeS: z.coerce
+    .number()
+    .int()
+    .min(3600)
+    .max(30 * 86_400)
+    .default(518_400),
+  /** Test-mode FX table `{currency: "<USD per unit, decimal string>"}` (source `fixed`, no staleness bound). */
+  testFxRates: json(
+    z.record(z.string().regex(/^[a-z]{3}$/), z.string().regex(/^\d+(\.\d+)?$/)),
+    '{"eur":"1.08","gbp":"1.27","chf":"1.13","jpy":"0.0067","cad":"0.73","aud":"0.66"}',
+  ),
+  /** Observation archive store (`file:<dir>` or `s3://<bucket>/<prefix>`); unset → the archive job does nothing. */
+  obsArchiveStore: z
+    .string()
+    .regex(/^(file:.+|s3:\/\/[a-z0-9.-]+(\/.*)?)$/)
+    .optional(),
+  obsArchiveAfterDays: z.coerce.number().int().min(1).max(3650).default(90),
+  /** S3 credentials/endpoint for an `s3://` archive store (EU object storage). */
+  obsArchiveS3Endpoint: url(["https:", "http:"]).optional(),
+  obsArchiveS3Region: z.string().min(1).default("eu-central-1"),
+  obsArchiveS3AccessKeyId: secret().optional(),
+  obsArchiveS3SecretAccessKey: secret().optional(),
   tierBLimits: json(
     z.object({ per_payment_usd: z.number().min(0), per_day_usd: z.number().min(0) }),
     '{"per_payment_usd":2000,"per_day_usd":20000}',
@@ -69,7 +103,11 @@ const shared = {
   screeningFailClosedUsd: z.coerce.number().min(0).default(1000),
   /** Watcher/verifier matches above this many USD need a second RPC's agreement (§10). */
   agreementUsd: z.coerce.number().min(0).default(10_000),
-  explorerEnabled: flag(false),
+  /** Default: on when the owner's Explorer token is present (§8.5). */
+  explorerEnabled: z
+    .enum(["true", "false", "1", "0"])
+    .transform((v) => v === "true" || v === "1")
+    .optional(),
   explorerBaseUrl: url(["https:", "http:"]).default("https://explorer.near-intents.org"),
   explorerToken: secret().optional(),
   /** Without the Explorer feed the poller sweeps unsignalled deposits this often (L-RL-03). */

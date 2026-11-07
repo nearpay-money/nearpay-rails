@@ -1,4 +1,4 @@
-/** Kysely table types (migrations/0001_rails.sql). Numeric columns travel as decimal strings. */
+/** Kysely table types (migrations/0001_rails.sql, 0002_stage2.sql). Numeric columns travel as decimal strings. */
 import type { ColumnType, KitTables } from "@nearpay-internal/db";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -31,6 +31,27 @@ export interface TokensTable {
   secondary_updated_at: NullableTimestamp;
   memo_required: boolean;
   refreshed_at: Timestamp;
+  // Stage 2 (0002): exact prices, peg currency, CoinGecko id
+  peg_currency: Opt<string>;
+  coingecko_id: Opt<string>;
+  price_num: NullableNumeric;
+  price_den: NullableNumeric;
+  secondary_num: NullableNumeric;
+  secondary_den: NullableNumeric;
+  secondary_source: Opt<string>;
+  secondary_fetched_at: NullableTimestamp;
+}
+
+export interface FxRatesTable {
+  livemode: boolean;
+  currency: string;
+  num: Numeric;
+  den: Numeric;
+  source: "ecb" | "fixed";
+  reference_date: ColumnType<string | null, string | null | undefined, string | null>;
+  as_of: Timestamp;
+  fetched_at: Timestamp;
+  valid_until: NullableTimestamp;
 }
 
 export interface WatchedDestinationsTable {
@@ -65,6 +86,32 @@ export type PriceSnapshotRow = {
   fx: string | null;
   par: boolean;
   as_of: string;
+  currency?: string;
+  par_currency?: string | null;
+  rates?: unknown[];
+};
+
+export type ReferenceRow = {
+  payment_intent: string;
+  payment_attempt: string | null;
+  refund: string | null;
+  refund_leg: number | null;
+};
+
+export type RefundRow = {
+  swap_type: "EXACT_INPUT" | "EXACT_OUTPUT" | null;
+  amount: string;
+  amount_out_expected: string | null;
+  min_amount_out: string | null;
+  token: { standard: string; address: string | null } | null;
+  transfer: {
+    signer_id: string;
+    receiver_id: string;
+    token: string;
+    amount: string;
+    memo: string;
+    deadline: string;
+  } | null;
 };
 
 export type EvidenceRow = {
@@ -141,6 +188,11 @@ export interface ExecutionsTable {
   created_at: Timestamp;
   updated_at: Timestamp;
   version: ColumnType<number, number | undefined, number>;
+  // Stage 2 (0002)
+  reference: NullableJson<ReferenceRow>;
+  refund: NullableJson<RefundRow>;
+  explorer_status: Opt<string>;
+  explorer_seen_at: NullableTimestamp;
 }
 
 export interface AmountTagsTable {
@@ -167,11 +219,14 @@ export interface ProviderObservationsTable {
   execution_id: string;
   source: ObservationSource;
   provider_status: string | null;
-  payload: Json<unknown>;
+  payload: NullableJson<unknown>;
   payload_sha256: Buffer;
   provider_updated_at: NullableTimestamp;
   applied: boolean;
   observed_at: Timestamp;
+  archive_key: Opt<string>;
+  archive_row: Opt<number>;
+  archived_at: NullableTimestamp;
 }
 
 export interface VerificationsTable {
@@ -241,6 +296,7 @@ export interface DestinationMinimumsTable {
 
 export interface RailsTables {
   tokens: TokensTable;
+  fx_rates: FxRatesTable;
   watched_destinations: WatchedDestinationsTable;
   executions: ExecutionsTable;
   amount_tags: AmountTagsTable;

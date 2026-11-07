@@ -13,8 +13,8 @@ import {
   sandboxIntentsEvents,
 } from "@nearpay-internal/spec";
 import bs58 from "bs58";
-import { oneClickCalls } from "../oneclick/client.js";
-import { assertMode, type RouteProvider } from "../port.js";
+import { oneClickCalls, textFetch } from "../oneclick/client.js";
+import { assertMode, type RouteProvider, type Scenario } from "../port.js";
 
 /** `ed25519:<base58>` from the seed script's base64url raw key (or an `ed25519:` key as is). */
 export function sandboxManagerKey(pub: string): string {
@@ -57,15 +57,35 @@ export function sandboxProvider(o: SandboxOptions): RouteProvider & { chains: Sa
     ...(o.fetch ? { fetch: o.fetch } : {}),
     ...(o.onResult ? { onResult: o.onResult } : {}),
   });
-  const calls = oneClickCalls({ client, headers: {}, takeQuote: async () => true, takeStatus: async () => true });
+  const textClient = httpClient({
+    target: "sandbox",
+    baseUrl: o.baseUrl,
+    timeoutMs: 4_000,
+    attempts: 1,
+    serviceToken: o.serviceToken,
+    breaker: false,
+    fetch: textFetch(o.fetch),
+  });
+  const calls = oneClickCalls({
+    client,
+    textClient,
+    headers: {},
+    takeQuote: async () => true,
+    takeStatus: async () => true,
+  });
   const key = sandboxManagerKey(o.signingPubkey);
   const p: RouteProvider & { chains: SandboxChains } = {
     name: "sandbox",
     livemode: false,
     tokens: calls.tokens,
-    async quote(livemode: boolean, req: OneClickQuoteRequest, scenarioAmount?: string) {
+    async quote(livemode: boolean, req: OneClickQuoteRequest, scenario?: Scenario) {
       assertMode(p, livemode);
-      return calls.quote({ ...req, ...(scenarioAmount ? { scenario_amount: scenarioAmount } : {}) });
+      return calls.quote({
+        ...req,
+        ...(scenario?.amount ? { scenario_amount: scenario.amount } : {}),
+        ...(scenario?.group ? { scenario_group: scenario.group } : {}),
+        ...(scenario?.kind ? { scenario_kind: scenario.kind } : {}),
+      });
     },
     async status(livemode, address, memo) {
       assertMode(p, livemode);

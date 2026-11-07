@@ -7,6 +7,7 @@
  * marks the USD stablecoins that may settle at par (§8.2).
  */
 import { AssetId } from "@nearpay/spec";
+import { parseExactDecimal, ratioToWire } from "../pricing/ratio.js";
 import type { ChainProfiles } from "./chain-profiles.js";
 
 /** USD stablecoins NearPay settles at par (depeg-guarded). Bridged variants keep their own symbol. */
@@ -34,6 +35,8 @@ export interface ProviderToken {
   readonly priceUsd: string | null;
   readonly priceUpdatedAt: Date | null;
   readonly contractAddress: string | null;
+  /** CoinGecko id (1Click `coingeckoId`), the secondary price key. */
+  readonly coingeckoId?: string | null;
 }
 
 export interface TokenRow {
@@ -50,13 +53,24 @@ export interface TokenRow {
   readonly price_usd: string | null;
   readonly price_updated_at: Date | null;
   readonly memo_required: boolean;
+  /** Fiat currency of a stablecoin (`usd` for USD stablecoins, `NP_STABLE_PEGS` for others), or null. */
+  readonly peg_currency: string | null;
+  readonly coingecko_id: string | null;
+  /** Exact primary price (reduced rational), null without a usable price. */
+  readonly price_num: string | null;
+  readonly price_den: string | null;
 }
 
 /**
  * Registry rows for a provider token list. Tokens on chains without a profile are kept (disabled) so
  * the registry mirrors the provider; malformed entries are dropped.
  */
-export function registryRows(livemode: boolean, tokens: readonly ProviderToken[], profiles: ChainProfiles): TokenRow[] {
+export function registryRows(
+  livemode: boolean,
+  tokens: readonly ProviderToken[],
+  profiles: ChainProfiles,
+  o: { pegs?: Readonly<Record<string, string>>; coingeckoIds?: Readonly<Record<string, string>> } = {},
+): TokenRow[] {
   const seen = new Set<string>();
   const rows: TokenRow[] = [];
   for (const t of tokens) {
@@ -65,6 +79,14 @@ export function registryRows(livemode: boolean, tokens: readonly ProviderToken[]
     seen.add(t.assetId);
     const profile = profiles.byBlockchain(t.blockchain);
     const family = familyOf(t.symbol);
+    const isUsd = USD_STABLE_FAMILIES.has(family);
+    let price: { num: string; den: string } | null = null;
+    if (t.priceUsd !== null) {
+      try {
+        const v = parseExactDecimal(t.priceUsd);
+        if (v.num > 0n) price = ratioToWire(v);
+      } catch {}
+    }
     rows.push({
       livemode,
       asset_id: t.assetId,
@@ -74,11 +96,15 @@ export function registryRows(livemode: boolean, tokens: readonly ProviderToken[]
       decimals: t.decimals,
       contract_address: t.contractAddress,
       family,
-      is_usd_stable: USD_STABLE_FAMILIES.has(family),
+      is_usd_stable: isUsd,
       enabled: profile !== undefined,
-      price_usd: t.priceUsd,
-      price_updated_at: t.priceUpdatedAt,
+      price_usd: price ? t.priceUsd : null,
+      price_updated_at: price ? t.priceUpdatedAt : null,
       memo_required: profile?.memoMode === "required",
+      peg_currency: o.pegs?.[t.assetId] ?? (isUsd ? "usd" : null),
+      coingecko_id: (o.coingeckoIds?.[t.assetId] ?? t.coingeckoId ?? null)?.slice(0, 128) ?? null,
+      price_num: price?.num ?? null,
+      price_den: price?.den ?? null,
     });
   }
   return rows;
@@ -105,3 +131,21 @@ export const DEFAULT_SLIPPAGE_BPS: Readonly<Record<Exclude<RouteClass, "intents_
   stable_pair: 50,
   volatile: 100,
 };
+
+export type TokenContractView = {
+  readonly standard: "erc20" | "native" | "nep141" | "spl" | "other";
+  readonly address: string | null;
+};
+
+/**
+ * How to transfer an asset on its chain (CR-15-06, spec `TokenContract`): `erc20` on EVM, `nep141` on NEAR, `spl` on
+ * Solana with a contract; `native` without one; `other` for families without a wallet recipe.
+ */
+export function tokenContract(family: string | undefined, contract: string | null): TokenContractView {
+  const address = contract && contract.length > 0 ? contract.slice(0, 256) : null;
+  if (family === "evm") return address ? { standard: "erc20", address } : { standard: "native", address: null };
+  if (family === "near") return address ? { standard: "nep141", address } : { standard: "native", address: null };
+  if (family === "solana") return address ? { standard: "spl", address } : { standard: "native", address: null };
+  if (family === "bitcoin") return { standard: "native", address: null };
+  return { standard: "other", address };
+}

@@ -17,6 +17,7 @@ import { parseEventLogs } from "@nearpay-internal/intents";
 import type { Rails } from "../app/context.js";
 import { applyChange, lockExecution } from "../app/ledger.js";
 import { applyEvidence, type EvidenceInput } from "../app/observations.js";
+import { policyFor } from "../app/pricing.js";
 import { tokenOf } from "../app/tokens.js";
 import { type ExecutionRow, pricedToken } from "../app/views.js";
 import type { HeldReason } from "../domain/execution/state.js";
@@ -125,7 +126,7 @@ async function verifyEvm(r: Rails, rpc: EvmRpc, row: ExecutionRow, hashes: reado
 async function needsAgreement(r: Rails, row: ExecutionRow): Promise<boolean> {
   const t = await tokenOf(r, row.livemode, row.destination_asset_id);
   if (!t) return true;
-  const usd = usdMicros(BigInt(row.amount_out_expected), pricedToken(t), { ...r.pricing, nowMs: r.now() });
+  const usd = usdMicros(BigInt(row.amount_out_expected), pricedToken(t), await policyFor(r, row.livemode));
   return usd === null || usd >= r.agreementUsdMicros;
 }
 
@@ -250,7 +251,7 @@ async function tierB(r: Rails, row: ExecutionRow, details: Record<string, unknow
   if (!hash) return pending({ ...details, reason: "provider reported no destination transaction" }, "B");
   const claimed = row.provider_amount_out ? BigInt(row.provider_amount_out) : null;
   if (claimed === null) return pending({ ...details, reason: "provider reported no amount" }, "B");
-  const p = { ...r.pricing, nowMs: r.now() };
+  const p = await policyFor(r, row.livemode);
   const token = await tokenOf(r, row.livemode, row.destination_asset_id);
   const usd = token ? usdMicros(claimed, pricedToken(token), p) : null;
   const today = await tierBToday(r, row);
@@ -280,7 +281,7 @@ async function tierBToday(r: Rails, row: ExecutionRow): Promise<bigint> {
       and terminal_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc'
       and evidence->>'tier' = 'B'`.execute(r.db);
   let total = 0n;
-  const p = { ...r.pricing, nowMs: r.now() };
+  const p = await policyFor(r, row.livemode);
   for (const x of rows.rows) {
     const t = await tokenOf(r, row.livemode, x.asset);
     total += (t && x.amount ? usdMicros(BigInt(x.amount), pricedToken(t), p) : null) ?? 0n;

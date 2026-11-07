@@ -37,6 +37,7 @@ import { type BackgroundTask, createService, type Service } from "@nearpay-inter
 import { STREAMS, type Subject } from "@nearpay-internal/spec";
 import { parse as parseYaml } from "yaml";
 import { railsRoutes } from "../api/routes.js";
+import { type ArchiveStore, archiveStore } from "../archive/store.js";
 import { type ApiConfig, evmRpcUrls, type FeedsConfig, type SharedConfig, type TrackerConfig } from "../config.js";
 import { deadLetters, railsHandlers } from "../consumers/handlers.js";
 import { DEFAULT_POLICY } from "../domain/pricing/pricing.js";
@@ -44,11 +45,14 @@ import { type ChainProfiles, chainProfiles } from "../domain/token-registry/chai
 import { type Budgets, budgets as createBudgets } from "../infra/budget.js";
 import { complianceScreening, type Screening } from "../infra/clients/compliance.js";
 import { type EvmRpc, evmRpc } from "../infra/clients/evm.js";
-import { type Explorer, explorer as explorerClient } from "../infra/clients/explorer.js";
+import { type Explorer, explorer as explorerClient, sandboxExplorer } from "../infra/clients/explorer.js";
 import { type Neardata, type NearRpc, neardata as neardataClient, nearRpc } from "../infra/clients/near.js";
 import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
 import type { DB } from "../infra/db/schema.js";
+import { ecbProvider, type FxFetch } from "../providers/fx/ecb.js";
 import { oneClickProvider } from "../providers/oneclick/client.js";
+import { coingeckoProvider } from "../providers/prices/coingecko.js";
+import { type PriceProvider, PriceRateLimited } from "../providers/prices/port.js";
 import { sandboxProvider } from "../providers/sandbox/client.js";
 import { loop } from "../trackers/cursors.js";
 import { watchOnce } from "../trackers/destination-watchers/evm-watcher.js";
@@ -58,6 +62,7 @@ import { indexOnce, sandboxFeedOnce } from "../trackers/near-indexer/indexer.js"
 import { verifierTask } from "../verifiers/verifier.js";
 import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
+import { alertStale, refreshEcb, refreshSecondary } from "./fx.js";
 import { refreshTokens } from "./tokens.js";
 
 export const DEFAULT_CHAINS_FILE = fileURLToPath(new URL("../../config/chains.yaml", import.meta.url));
@@ -148,7 +153,16 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string): Built {
     testTreasury: config.testTreasuryAccount,
     intentsContract: config.intentsContract,
     referral: config.referral,
-    pricing: { ...DEFAULT_POLICY, currencies: new Set(config.pricingCurrencies) },
+    pricing: {
+      ...DEFAULT_POLICY,
+      currencies: new Set(config.pricingCurrencies),
+      primaryMaxAgeMs: config.pricePrimaryMaxAgeS * 1000,
+      secondaryMaxAgeMs: config.priceSecondaryMaxAgeS * 1000,
+    },
+    stablePegs: config.stablePegs,
+    coingeckoIds: config.priceSecondaryIds,
+    fx: { graceS: config.fxGraceS, maxAgeS: config.fxMaxAgeS, testRates: config.testFxRates },
+    archive: { store: config.obsArchiveStore ?? null, afterDays: config.obsArchiveAfterDays },
     slippageBps: config.slippageBps,
     indicativeFeeBps: config.indicativeFeeBps,
     providerSplit: {
@@ -160,7 +174,7 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string): Built {
       perPaymentUsdMicros: usdMicros(config.tierBLimits.per_payment_usd),
       perDayUsdMicros: usdMicros(config.tierBLimits.per_day_usd),
     },
-    explorerEnabled: config.explorerEnabled && Boolean(config.explorerToken),
+    explorerEnabled: (config.explorerEnabled ?? Boolean(config.explorerToken)) && Boolean(config.explorerToken),
     awaitingSweepS: config.awaitingSweepS,
     screeningFailClosedUsdMicros: usdMicros(config.screeningFailClosedUsd),
     agreementUsdMicros: usdMicros(config.agreementUsd),
@@ -255,9 +269,17 @@ export interface FeedsDeps extends ServiceDeps {
   neardata?: Neardata | null;
   evm?: ReadonlyMap<string, EvmRpc>;
   explorer?: Explorer | null;
+  /** Test-mode Explorer (sandbox mirror); default: the mirror when the sandbox is configured. */
+  testExplorer?: Explorer | null;
+  /** Secondary price provider (live); default CoinGecko keyless. */
+  prices?: PriceProvider | null;
+  /** FX provider (live); default the ECB daily XML. */
+  fx?: FxFetch | null;
+  /** Observation archive store; default from `NP_OBS_ARCHIVE_STORE`. */
+  archive?: ArchiveStore | null;
   tickMs?: number;
   /** Loop cadences (tests shorten them). */
-  intervals?: Partial<Record<"tokens" | "sandbox" | "indexer" | "watcher", number>>;
+  intervals?: Partial<Record<"tokens" | "sandbox" | "indexer" | "watcher" | "prices" | "fx", number>>;
 }
 
 export async function createFeeds(
@@ -298,11 +320,21 @@ export async function createFeeds(
   service.addBackground(
     domainConsumersTask({ bus, consumer: "rails", handlers, onDeadLetter: deadLetters(db.db), onError }),
   );
+  const archive =
+    deps.archive !== undefined
+      ? deps.archive
+      : archiveStore(config.obsArchiveStore ?? null, {
+          ...(config.obsArchiveS3Endpoint ? { endpoint: config.obsArchiveS3Endpoint } : {}),
+          region: config.obsArchiveS3Region,
+          ...(config.obsArchiveS3AccessKeyId ? { accessKeyId: config.obsArchiveS3AccessKeyId } : {}),
+          ...(config.obsArchiveS3SecretAccessKey ? { secretAccessKey: config.obsArchiveS3SecretAccessKey } : {}),
+          ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        });
   service.addBackground(
     jobWorkerTask({
       db: db.db,
       workerId: `rails-feeds@${hostname()}:${process.pid}`,
-      handlers: jobHandlers(r),
+      handlers: jobHandlers(r, { archive }),
       onError: (e, job) => service.log.warn({ err: e, job }, "job failed"),
       onDeadLetter: (j) => service.log.error({ job: j }, "job dead-lettered"),
       ...(deps.tickMs ? { pollMs: deps.tickMs } : {}),
@@ -319,7 +351,15 @@ export async function createFeeds(
     }),
   );
 
-  const iv = { tokens: 30_000, sandbox: 1_000, indexer: 1_000, watcher: 0, ...deps.intervals };
+  const iv = {
+    tokens: 30_000,
+    sandbox: 1_000,
+    indexer: 1_000,
+    watcher: 0,
+    prices: 60_000,
+    fx: 30 * 60_000,
+    ...deps.intervals,
+  };
   const leader = (name: string, run: (signal: AbortSignal) => Promise<void>): BackgroundTask =>
     leaderTask({
       pool: db.pool,
@@ -340,6 +380,53 @@ export async function createFeeds(
       }),
     ),
   );
+  // secondary prices (live, CoinGecko keyless): 60 s; 429 → back off ×2 up to 10 min (§9)
+  const prices =
+    deps.prices !== undefined
+      ? deps.prices
+      : r.providers.live
+        ? coingeckoProvider({ baseUrl: config.priceSecondaryUrl, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
+        : null;
+  if (prices) {
+    let backoff = iv.prices;
+    service.addBackground(
+      leader("secondary-prices", (signal) =>
+        loop(r, "secondary-prices", signal, async () => {
+          try {
+            await refreshSecondary(r, prices);
+            backoff = iv.prices;
+          } catch (e) {
+            if (!(e instanceof PriceRateLimited)) throw e;
+            backoff = Math.min(backoff * 2, 600_000);
+            r.log.warn({ delay_ms: backoff }, "secondary price feed rate-limited; backing off");
+          }
+          return backoff;
+        }),
+      ),
+    );
+  }
+  // FX (live, ECB daily XML, conditional GET every 30 min); test mode: the fixed table, once at boot
+  const fx =
+    deps.fx !== undefined ? deps.fx : ecbProvider({ url: config.fxUrl, ...(deps.fetch ? { fetch: deps.fetch } : {}) });
+  if (fx) {
+    service.addBackground(
+      leader("fx-refresh", (signal) =>
+        loop(
+          r,
+          "fx-refresh",
+          signal,
+          async () => {
+            await refreshEcb(r, fx).catch(async (e) => {
+              await alertStale(r);
+              throw e;
+            });
+            return iv.fx;
+          },
+          60_000,
+        ),
+      ),
+    );
+  }
   if (r.providers.test) {
     service.addBackground(
       leader("sandbox-feed", (signal) =>
@@ -384,6 +471,26 @@ export async function createFeeds(
     let turn = 0;
     service.addBackground(
       leader("explorer-feed", (signal) => loop(r, "explorer-feed", signal, () => explorerOnce(r, ex, turn++), 10_000)),
+    );
+  }
+  // test mode: the sandbox's Explorer mirror, same client code and schemas (§8.5)
+  const tex =
+    deps.testExplorer !== undefined
+      ? deps.testExplorer
+      : config.sandboxBaseUrl
+        ? sandboxExplorer({
+            baseUrl: config.sandboxBaseUrl,
+            serviceToken: b.serviceToken,
+            referral: r.referral,
+            ...(deps.fetch ? { fetch: deps.fetch } : {}),
+          })
+        : null;
+  if (tex) {
+    let turn = 0;
+    service.addBackground(
+      leader("explorer-feed-test", (signal) =>
+        loop(r, "explorer-feed-test", signal, () => explorerOnce(r, tex, turn++), 5_000),
+      ),
     );
   }
   service.onShutdown(async () => {

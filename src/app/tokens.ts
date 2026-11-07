@@ -12,7 +12,7 @@ export async function refreshTokens(r: Rails, livemode: boolean): Promise<number
   const provider = livemode ? r.providers.live : r.providers.test;
   if (!provider) return 0;
   const list = await provider.tokens();
-  const rows = registryRows(livemode, list, r.profiles);
+  const rows = registryRows(livemode, list, r.profiles, { pegs: r.stablePegs, coingeckoIds: r.coingeckoIds });
   if (rows.length === 0) throw new Error(`${provider.name} returned no usable tokens`);
   const now = new Date(r.now());
   await r.db.transaction().execute(async (tx) => {
@@ -32,6 +32,21 @@ export async function refreshTokens(r: Rails, livemode: boolean): Promise<number
         price_updated_at: t.price_updated_at,
         memo_required: t.memo_required,
         refreshed_at: now,
+        peg_currency: t.peg_currency,
+        coingecko_id: t.coingecko_id,
+        price_num: t.price_num,
+        price_den: t.price_den,
+        // test mode: the sandbox price is the secondary source too (lld/rails.md §8.2 sources table)
+        ...(livemode
+          ? {}
+          : {
+              secondary_price_usd: t.price_usd,
+              secondary_updated_at: t.price_updated_at,
+              secondary_num: t.price_num,
+              secondary_den: t.price_den,
+              secondary_source: t.price_num ? "sandbox" : null,
+              secondary_fetched_at: t.price_num ? now : null,
+            }),
       }));
       await tx
         .insertInto("tokens")
@@ -50,6 +65,20 @@ export async function refreshTokens(r: Rails, livemode: boolean): Promise<number
             price_updated_at: eb.ref("excluded.price_updated_at"),
             memo_required: eb.ref("excluded.memo_required"),
             refreshed_at: eb.ref("excluded.refreshed_at"),
+            peg_currency: eb.ref("excluded.peg_currency"),
+            coingecko_id: eb.ref("excluded.coingecko_id"),
+            price_num: eb.ref("excluded.price_num"),
+            price_den: eb.ref("excluded.price_den"),
+            ...(livemode
+              ? {}
+              : {
+                  secondary_price_usd: eb.ref("excluded.secondary_price_usd"),
+                  secondary_updated_at: eb.ref("excluded.secondary_updated_at"),
+                  secondary_num: eb.ref("excluded.secondary_num"),
+                  secondary_den: eb.ref("excluded.secondary_den"),
+                  secondary_source: eb.ref("excluded.secondary_source"),
+                  secondary_fetched_at: eb.ref("excluded.secondary_fetched_at"),
+                }),
           })),
         )
         .execute();

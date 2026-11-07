@@ -20,6 +20,13 @@ export type StatusOutcome =
   | { readonly ok: false; readonly kind: "not_found" }
   | { readonly ok: false; readonly kind: "unavailable"; readonly detail: string };
 
+/** Sandbox scenario selection (`SandboxQuoteRequest` extras): amount digits, group (`pi_…`/`re_…`) and kind. */
+export interface Scenario {
+  readonly amount?: string;
+  readonly group?: string;
+  readonly kind?: "payment" | "refund";
+}
+
 export class ModeViolation extends Error {
   override readonly name = "ModeViolation";
 }
@@ -29,8 +36,8 @@ export interface RouteProvider {
   /** The only mode this provider serves. */
   readonly livemode: boolean;
   tokens(): Promise<ProviderToken[]>;
-  /** `scenarioAmount` is the sandbox's scenario selector (ignored by 1Click). */
-  quote(livemode: boolean, req: OneClickQuoteRequest, scenarioAmount?: string): Promise<QuoteOutcome>;
+  /** `scenario` is the sandbox's scenario selector (sandbox LLD §4; ignored by 1Click). */
+  quote(livemode: boolean, req: OneClickQuoteRequest, scenario?: Scenario): Promise<QuoteOutcome>;
   status(livemode: boolean, depositAddress: string, memo: string | null): Promise<StatusOutcome>;
   submitDeposit(
     livemode: boolean,

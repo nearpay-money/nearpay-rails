@@ -12,10 +12,11 @@ import type {
   listInternalOptions,
   lookupExecutionByDeposit,
 } from "@nearpay-internal/spec";
-import { dualPrice, indicativeUsd, parCheck } from "../domain/pricing/pricing.js";
-import { routeClass } from "../domain/token-registry/registry.js";
+import { dualPrice, indicativeUsd, parCheck, pricesOf } from "../domain/pricing/pricing.js";
+import { routeClass, tokenContract } from "../domain/token-registry/registry.js";
 import type { Rails } from "./context.js";
 import { flag } from "./executions.js";
+import { policyFor } from "./pricing.js";
 import { enabledTokens, publicAssets, tokenAnyMode } from "./tokens.js";
 import { executionView, pricedToken, type TokenRowDb } from "./views.js";
 
@@ -26,8 +27,9 @@ export async function assetView(
 ): Promise<RouteResponse<typeof getInternalAsset>> {
   const t = await tokenAnyMode(r, assetId, livemode);
   if (!t?.enabled) throw new ApiError("asset_unsupported", { params: { asset_id: assetId }, param: "asset_id" });
-  const p = { ...r.pricing, nowMs: r.now() };
+  const p = await policyFor(r, t.livemode);
   const priced = pricedToken(t);
+  const parOk = parCheck(priced, p).ok;
   return {
     asset_id: t.asset_id,
     chain: t.chain,
@@ -37,9 +39,18 @@ export async function assetView(
     family: t.family,
     is_usd_stable: t.is_usd_stable,
     price_usd: t.price_usd === null ? null : trimDecimal(t.price_usd),
-    price_ok: parCheck(priced, p).ok || dualPrice(priced, p).ok,
+    price_ok: parOk || dualPrice(priced, p).ok,
     as_of: t.price_updated_at?.toISOString() ?? null,
+    peg_currency: priced.peg_currency,
+    par_ok: parOk,
+    prices: pricesOf(priced, p),
+    token: tokenContractOf(r, t),
   };
+}
+
+/** CR-15-06 `TokenContract` of a registry row (by its chain's family). */
+export function tokenContractOf(r: Rails, t: TokenRowDb) {
+  return tokenContract(r.profiles.get(t.chain)?.family, t.contract_address);
 }
 
 /** numeric(38,18) → shortest decimal ("0.999442000…" → "0.999442"). */
@@ -88,7 +99,7 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
   const quoting = lm ? (await flag(r, "quoting_enabled")) && r.treasury !== null : true;
   const out: Option[] = [];
   const tokens = await enabledTokens(r, lm);
-  const p = { ...r.pricing, nowMs: r.now() };
+  const p = await policyFor(r, lm);
   const settleable = parCheck(pricedToken(d), p).ok || dualPrice(pricedToken(d), p).ok;
   for (const o of tokens) {
     if (q.chain && o.chain !== q.chain) continue;
@@ -116,6 +127,7 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
       min_deadline_s: profile.minDeadlineS,
       available: reason === null,
       reason,
+      token: tokenContractOf(r, o),
     });
   }
   if (q.destination_type === "intents_account" && (!q.chain || q.chain === "near:mainnet")) {
@@ -133,6 +145,8 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
       min_deadline_s: near?.minDeadlineS ?? 120,
       available: quoting && settleable,
       reason: !quoting ? "payments are paused" : settleable ? null : "no reliable price for the settlement asset",
+      // paid from the payer's Intents balance: a Verifier transfer, no chain token recipe
+      token: null,
     });
   }
   return { options: out };
@@ -200,9 +214,10 @@ export async function evidencePage(
     .selectAll()
     .where("account_id", "=", account)
     .where("livemode", "=", q.livemode)
-    .where("state", "=", "succeeded")
+    .where("state", "in", (q.states?.split(",") ?? ["succeeded"]) as ("succeeded" | "refunded" | "failed")[])
     .where("terminal_at", ">=", start)
     .where("terminal_at", "<", end);
+  if (q.kind) query = query.where("kind", "=", q.kind as "payment" | "refund");
   if (q.starting_after) query = query.where("id", ">", toUuid(q.starting_after, "ex"));
   const rows = await query
     .orderBy("id")
