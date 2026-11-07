@@ -303,7 +303,10 @@ async function screen(r: Rails, b: CreateBody, x: Prepared): Promise<void> {
 export async function createExecution(r: Rails, b: CreateBody): Promise<Execution> {
   const accountId = toUuid(b.account_id, "acct");
   const existing = await byKey(r, b.idempotency_key);
-  if (existing) return replay(existing, accountId, b.livemode);
+  if (existing) {
+    if (existing.kind !== "payment") throw new ApiError("idempotency_key_reused", { param: "idempotency_key" });
+    return replay(existing, accountId, b.livemode);
+  }
 
   if (b.livemode) {
     if (!(await flag(r, "quoting_enabled"))) throw railUnavailable("kill switch engaged");

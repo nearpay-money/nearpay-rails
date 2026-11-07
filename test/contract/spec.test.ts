@@ -12,6 +12,7 @@ import {
   INTERNAL_ROUTES,
   OneClickQuoteRequest,
   OneClickQuoteResponse,
+  OneClickStatusResponse,
   SUBJECTS,
   type Subject,
 } from "@nearpay-internal/spec";
@@ -24,11 +25,11 @@ import { fixture } from "../support/fakes.js";
 const ALL = [...PUBLIC_ROUTES, ...INTERNAL_ROUTES];
 
 describe("routes and events", () => {
-  it("binds every Stage-1 rails route, and nothing else", () => {
+  it("binds every Stage 1 + 2 rails route (internal, public and console ops), and nothing else", () => {
     const bindings = railsRoutes({ profiles: { all: () => [] } } as never);
     expect(unimplementedRoutes("rails", ALL, bindings).map((r) => r.id)).toEqual([]);
     expect(bindings.map((b) => b.route.id).sort()).toEqual(
-      ALL.filter((r) => r.service === "rails" && r.stage <= 1)
+      ALL.filter((r) => r.service === "rails" && r.stage <= 2)
         .map((r) => r.id)
         .sort(),
     );
@@ -42,13 +43,14 @@ describe("routes and events", () => {
 
   it("emits every subject rails produces", () => {
     const produced = (Object.keys(SUBJECTS) as Subject[]).filter(
-      (k) => SUBJECTS[k].producer === "rails" && SUBJECTS[k].stage <= 1,
+      (k) => SUBJECTS[k].producer === "rails" && SUBJECTS[k].stage <= 2,
     );
     const emitted = new Set(
       (["awaiting_deposit", "succeeded", "refunded", "failed", "held", "settling"] as const).map((to) =>
         subjectFor("verifying", to),
       ),
     );
+    emitted.add("evt.rails.ops_action.recorded"); // app/ops.ts reverify
     expect([...emitted].sort()).toEqual([...produced].sort());
     const files = (dir: string): string[] =>
       readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : [join(dir, f)]));
@@ -59,7 +61,11 @@ describe("routes and events", () => {
   });
 });
 
-describe("1Click wire schemas", () => {
+describe("1Click and Explorer wire schemas", () => {
+  it("parse the recorded live status unmodified (spec 0.2.0 nullish shape)", () => {
+    expect(OneClickStatusResponse.safeParse(fixture("oneclick-status-pending-live.json")).success).toBe(true);
+  });
+
   it("parse the recorded quote and request", () => {
     expect(OneClickQuoteResponse.safeParse(fixture("oneclick/dry-quote.json")).success).toBe(true);
     expect(OneClickQuoteRequest.safeParse(fixture("oneclick/dry-quote.request.json")).success).toBe(true);

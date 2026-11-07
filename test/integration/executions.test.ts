@@ -162,14 +162,14 @@ describe("route_quote (test mode, sandbox)", () => {
     ["a chain that is not the asset's", { origin: { chain: "eip155:1" } }, 400, "invalid_request", "origin.chain"],
     ["an invalid refund address", { origin: { refund_to: "0x123" } }, 400, "invalid_request", "origin.refund_to"],
     ["an invalid destination", { destination: { address: "nope" } }, 400, "invalid_request", "destination.address"],
+    // Stage 2: non-par settlement and EUR pricing work (stage2-sandbox.test.ts); unaccepted currencies are refused
     [
-      "a non-par settlement asset (Stage 1)",
-      { destination: { asset_id: ETH_BASE, chain: "eip155:8453" } },
-      503,
-      "pricing_unavailable",
+      "a currency outside NP_PRICING_CURRENCIES",
+      { pricing: { currency: "sek", amount: 2000 } },
+      400,
+      "currency_unsupported",
       undefined,
     ],
-    ["a non-usd currency", { pricing: { currency: "eur", amount: 2000 } }, 503, "pricing_unavailable", undefined],
     [
       "a session ending too soon",
       { deadline_cap: new Date(Date.now() + 120_000).toISOString() },

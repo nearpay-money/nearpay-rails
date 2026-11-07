@@ -620,11 +620,21 @@ describe("Explorer feed", () => {
         status: 200,
         body: [
           {
+            originAsset: USDC_ARB,
+            destinationAsset: USDC_BASE,
             depositAddress: x.deposit?.address,
             depositMemo: null,
+            recipient: "0x1111111111111111111111111111111111111111",
             status: "PROCESSING",
             createdAt: new Date().toISOString(),
+            createdAtTimestamp: Math.floor(Date.now() / 1000),
             referral: "nearpay",
+            amountIn: "0",
+            amountInFormatted: "0",
+            amountInUsd: "0",
+            amountOut: "0",
+            amountOutFormatted: "0",
+            amountOutUsd: "0",
           },
         ],
       };
