@@ -4,7 +4,8 @@
  * A refund leg moves value from the merchant destination (`source`) back to the payer (`recipient`, INV-7):
  * - `route_quote`: a 1Click route without app fee or tag. `EXACT_INPUT` quotes `amount` in (the payer absorbs route
  *   costs; the verification floor is the quote's `minAmountOut`); `EXACT_OUTPUT` quotes the value of `amount` out in
- *   the recipient asset, converted by §8.2 pricing (the merchant absorbs). `refundTo` is the merchant destination.
+ *   the recipient asset, converted by §8.2 pricing (the merchant absorbs). Both are bounded against §8.2 pricing
+ *   (`checkRefundBounds`: payer floor within slippage, price band, merchant cost cap); pricing unavailable refuses. `refundTo` is the merchant destination.
  *   An Intents-account source deposits with `depositType INTENTS`: the merchant signs one Verifier transfer to the
  *   deposit address carrying a binding memo (`refund.transfer`, relayed by agentpay).
  * - `intents_transfer`: one Verifier transfer merchant → payer Intents account, same asset, bound by `np1:` memo
@@ -24,7 +25,7 @@ import type {
   OneClickQuoteResponse,
 } from "@nearpay-internal/spec";
 import { binding as bindingOf, executionDeadline } from "../domain/execution/amounts.js";
-import { checkQuote } from "../domain/execution/integrity.js";
+import { checkQuote, checkRefundBounds, REFUND_PRICE_BAND_BPS } from "../domain/execution/integrity.js";
 import { nextPollAt } from "../domain/execution/schedule.js";
 import { PricingError, settle, usdMicros } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
@@ -60,6 +61,11 @@ interface Leg {
   amount: bigint;
   /** EXACT_OUTPUT: the converted amount the payer must receive (recipient base units). */
   convertedOut: bigint | null;
+  /**
+   * Route legs: `settle(amount)` in recipient base units (§8.2) — the value the quote is bounded against (audit
+   * finding 4). EXACT_OUTPUT: equal to `convertedOut`. Null for `intents_transfer`.
+   */
+  pricedOut: bigint | null;
   snapshot: Record<string, unknown> | null;
   amountUsdMicros: bigint | null;
 }
@@ -127,14 +133,20 @@ async function prepareLeg(r: Rails, b: RefundBody, accountId: string): Promise<L
 
   const p = await policyFor(r, lm);
   let convertedOut: bigint | null = null;
+  let pricedOut: bigint | null = null;
   let snapshot: Record<string, unknown> | null = null;
-  if (b.method === "route_quote" && b.swap_type === "EXACT_OUTPUT") {
+  // Every route leg is priced, EXACT_INPUT too: its quote is bounded against this value (audit finding 4), so
+  // pricing unavailable refuses the leg (fail closed) before any quote is asked.
+  if (b.method === "route_quote") {
     try {
       const st = settle({ currency: "asset", assetId: s.asset_id, amount }, pricedToken(d), p, (id) =>
         id === s.asset_id ? pricedToken(s) : undefined,
       );
-      convertedOut = st.amount;
-      snapshot = st.snapshot as unknown as Record<string, unknown>;
+      pricedOut = st.amount;
+      if (b.swap_type === "EXACT_OUTPUT") {
+        convertedOut = st.amount;
+        snapshot = st.snapshot as unknown as Record<string, unknown>;
+      }
     } catch (e) {
       if (e instanceof PricingError) throw pricingApiError(r, e, "amount");
       throw e;
@@ -156,6 +168,7 @@ async function prepareLeg(r: Rails, b: RefundBody, accountId: string): Promise<L
     deadline: dl.deadline,
     amount,
     convertedOut,
+    pricedOut,
     snapshot,
     amountUsdMicros: usdMicros(amount, pricedToken(s), p),
   };
@@ -295,6 +308,17 @@ async function createRouteLeg(r: Rails, b: RefundBody, x: Leg): Promise<Executio
     validDeposit: (a) => (x.sourceIntents ? NearAccountId.safeParse(a).success : validateAddress(x.sourceChain, a).ok),
   });
   const failures = integrity.ok ? [] : [...integrity.failures];
+  // refund bounds (audit finding 4): what the payer receives / the merchant pays, against §8.2 pricing
+  failures.push(
+    ...checkRefundBounds({
+      swapType: b.swap_type,
+      amount: x.amount,
+      pricedOut: x.pricedOut as bigint,
+      slippageBps: req.slippageTolerance,
+      bandBps: REFUND_PRICE_BAND_BPS,
+      quote: res.quote,
+    }),
+  );
   if (!provider.verifySignature(res)) failures.push("provider signature does not verify");
   if (failures.length) {
     r.metrics.quote(provider.name, "integrity_failed", seconds);

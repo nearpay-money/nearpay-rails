@@ -99,11 +99,11 @@ describe("refund legs (POST /internal/refund_executions)", () => {
       swap_type: "EXACT_INPUT",
       amount: "5000000",
       amount_out_expected: "4950000",
-      min_amount_out: "4925250",
+      min_amount_out: "4935150", // same_asset slippage 30 bps below amountOut
       transfer: null,
     });
     expect(x.refund?.token?.standard).toBe("erc20");
-    expect(x.settlement.expected).toBe("4925250");
+    expect(x.settlement.expected).toBe("4935150");
     expect(x.reference).toEqual(body.reference);
     expect(quoteSent()).toMatchObject({
       swapType: "EXACT_INPUT",
@@ -195,6 +195,68 @@ describe("refund legs (POST /internal/refund_executions)", () => {
         .where("name", "=", "quoting_enabled")
         .execute();
     }
+  });
+
+  describe("refund quote bounds against §8.2 pricing (audit finding 4)", () => {
+    const refused = async (tamper: (q: Record<string, unknown>) => void, over: Record<string, unknown> = {}) => {
+      const before = one.requests.filter((x) => x.path === "/v0/quote").length;
+      one.tamper = (resp) => tamper(resp.quote as Record<string, unknown>);
+      try {
+        const r = await s.call("POST", "/internal/refund_executions", { body: refundBody(over) });
+        expect(one.requests.filter((x) => x.path === "/v0/quote").length).toBe(before + 1);
+        expect(r.status).toBe(502);
+        expect(error(r).code).toBe("quote_integrity_failed");
+      } finally {
+        one.tamper = null;
+      }
+    };
+
+    it("EXACT_INPUT: a signed quote with minAmountOut far below amountOut is refused (the payer's floor)", async () => {
+      // passes the old 0 < minAmountOut ≤ amountOut check
+      await refused((q) => {
+        q.minAmountOut = "1";
+      });
+    });
+
+    it("EXACT_INPUT: a signed quote whose amountOut is outside the price band is refused", async () => {
+      await refused((q) => {
+        q.amountOut = "4000000"; // 20 % below the priced 5 000 000
+        q.minAmountOut = "3988000";
+      });
+    });
+
+    it("EXACT_OUTPUT: a signed quote charging the merchant above band + slippage is refused", async () => {
+      await refused(
+        (q) => {
+          q.amountIn = "5500000"; // +10 % for 5 USDC out
+          q.minAmountIn = "5500000";
+        },
+        { swap_type: "EXACT_OUTPUT" },
+      );
+    });
+
+    it("pricing unavailable refuses an EXACT_INPUT leg before any quote (fail closed)", async () => {
+      const before = one.requests.filter((x) => x.path === "/v0/quote").length;
+      const stale = new Date(Date.now() - 3_600_000);
+      await s.admin.db
+        .updateTable("tokens")
+        .set({ price_updated_at: stale })
+        .where("livemode", "=", true)
+        .where("asset_id", "in", [USDC_BASE, USDC_ARB])
+        .execute();
+      try {
+        const r = await s.call("POST", "/internal/refund_executions", { body: refundBody() });
+        expect(r.status).toBe(503);
+        expect(error(r).code).toBe("pricing_unavailable");
+        expect(one.requests.filter((x) => x.path === "/v0/quote").length).toBe(before);
+      } finally {
+        await s.admin.db
+          .updateTable("tokens")
+          .set({ price_updated_at: new Date() })
+          .where("livemode", "=", true)
+          .execute();
+      }
+    });
   });
 
   it("a provider SUCCESS alone never settles a refund leg (INV-2): verifying, not succeeded", async () => {
