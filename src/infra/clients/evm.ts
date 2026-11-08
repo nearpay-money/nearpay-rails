@@ -27,6 +27,7 @@ export interface EvmReceipt {
 
 export interface EvmTx {
   readonly hash: string;
+  readonly from?: string | null;
   readonly to: string | null;
   readonly value: string;
   readonly blockNumber: string | null;
@@ -120,8 +121,8 @@ export function evmRpc(o: { urls: readonly string[]; fetch?: typeof fetch; timeo
 /** ERC-20 transfers to `recipients` in a receipt, by token contract. */
 export function erc20Transfers(
   logs: readonly EvmLog[],
-): { token: string; to: string; amount: bigint; logIndex: string }[] {
-  const out: { token: string; to: string; amount: bigint; logIndex: string }[] = [];
+): { token: string; from: string; to: string; amount: bigint; logIndex: string }[] {
+  const out: { token: string; from: string; to: string; amount: bigint; logIndex: string }[] = [];
   for (const l of logs) {
     if (l.topics[0]?.toLowerCase() !== TRANSFER_TOPIC || l.topics.length !== 3) continue;
     let amount: bigint;
@@ -130,7 +131,13 @@ export function erc20Transfers(
     } catch {
       continue;
     }
-    out.push({ token: l.address.toLowerCase(), to: topicAddress(l.topics[2] as string), amount, logIndex: l.logIndex });
+    out.push({
+      token: l.address.toLowerCase(),
+      from: topicAddress(l.topics[1] as string),
+      to: topicAddress(l.topics[2] as string),
+      amount,
+      logIndex: l.logIndex,
+    });
   }
   return out;
 }

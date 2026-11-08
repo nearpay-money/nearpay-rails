@@ -9,25 +9,34 @@ export type VerificationResult = "pass" | "short" | "mismatch" | "not_found" | "
 
 export interface ObservedTransfer {
   readonly to: string;
+  /** Sender, when the chain shows it (spec 0.3.0 `Evidence.sender`). */
+  readonly from?: string | null;
   readonly assetId: string;
   readonly amount: bigint;
 }
 
 /**
  * Verifier comparison (§8.8): the sum of final transfers of the settlement asset to the recipient —
- * `≥ expected` pass, `0 < sum < expected` short, nothing to the recipient mismatch.
+ * `≥ expected` pass, `0 < sum < expected` short, nothing to the recipient mismatch. `sender` (spec 0.3.0
+ * `Evidence.sender`) is the sender of the largest counted transfer (the first on a tie); null when the chain
+ * named none.
  */
 export function compareTransfers(
   transfers: readonly ObservedTransfer[],
   expect: { recipient: string; assetId: string; expected: bigint },
-): { result: "pass" | "short" | "mismatch"; amount: bigint } {
+): { result: "pass" | "short" | "mismatch"; amount: bigint; sender: string | null } {
   let sum = 0n;
+  let largest: ObservedTransfer | null = null;
   for (const t of transfers) {
-    if (t.to === expect.recipient && t.assetId === expect.assetId && t.amount > 0n) sum += t.amount;
+    if (t.to === expect.recipient && t.assetId === expect.assetId && t.amount > 0n) {
+      sum += t.amount;
+      if (largest === null || t.amount > largest.amount) largest = t;
+    }
   }
-  if (sum >= expect.expected) return { result: "pass", amount: sum };
-  if (sum > 0n) return { result: "short", amount: sum };
-  return { result: "mismatch", amount: 0n };
+  const sender = largest?.from ?? null;
+  if (sum >= expect.expected) return { result: "pass", amount: sum, sender };
+  if (sum > 0n) return { result: "short", amount: sum, sender };
+  return { result: "mismatch", amount: 0n, sender: null };
 }
 
 /**

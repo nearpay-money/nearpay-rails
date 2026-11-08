@@ -99,6 +99,7 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
           chain,
           kind: "amount",
           to: t.to,
+          from: t.from,
           assetId,
           amount: t.amount,
           memo: null,

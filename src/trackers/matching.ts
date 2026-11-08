@@ -47,6 +47,7 @@ export async function matchCredits(r: Rails, credits: readonly Credit[], o: Matc
     txHash: c.txHash,
     blockRef: c.blockRef,
     recipient: c.to,
+    sender: c.from,
     assetId: c.assetId,
     amount: c.amount,
     finality: o.finality,

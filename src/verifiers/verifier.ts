@@ -30,7 +30,7 @@ import {
 } from "../domain/verification/verification.js";
 import { type EvmRpc, erc20Transfers } from "../infra/clients/evm.js";
 import type { NearRpc } from "../infra/clients/near.js";
-import { outcomeSucceeded } from "../trackers/near-indexer/parse.js";
+import { outcomeSucceeded, senderOf } from "../trackers/near-indexer/parse.js";
 
 export interface VerifierDeps {
   readonly near: NearRpc | null;
@@ -45,6 +45,8 @@ export interface VerifyOutcome {
   readonly txHash: string | null;
   readonly blockRef: string | null;
   readonly amount: bigint;
+  /** spec 0.3.0 `Evidence.sender`: who sent the verified transfer (null = the chain did not say). */
+  readonly sender?: string | null;
   readonly details: Record<string, unknown>;
   /** Hold at once (no point retrying). */
   readonly holdNow?: HeldReason;
@@ -89,12 +91,19 @@ async function verifyEvm(r: Rails, rpc: EvmRpc, row: ExecutionRow, hashes: reado
     if (contract) {
       transfers = erc20Transfers(receipt.logs)
         .filter((t) => t.token === contract)
-        .map((t) => ({ to: t.to, assetId: row.destination_asset_id, amount: t.amount }));
+        .map((t) => ({ to: t.to, from: t.from, assetId: row.destination_asset_id, amount: t.amount }));
     } else {
       const tx = await rpc.transaction(hash);
       transfers =
         tx?.to && tx.to.toLowerCase() === recipient
-          ? [{ to: recipient, assetId: row.destination_asset_id, amount: BigInt(tx.value) }]
+          ? [
+              {
+                to: recipient,
+                from: tx.from ? tx.from.toLowerCase() : null,
+                assetId: row.destination_asset_id,
+                amount: BigInt(tx.value),
+              },
+            ]
           : [];
       if (transfers.length === 0) return tierB(r, row, { hash, reason: "native transfer not provable on chain" });
     }
@@ -107,6 +116,7 @@ async function verifyEvm(r: Rails, rpc: EvmRpc, row: ExecutionRow, hashes: reado
       txHash: hash,
       blockRef: BigInt(receipt.blockNumber).toString(),
       amount: c.amount,
+      sender: c.sender,
       details: { hash, block_hash: receipt.blockHash },
     };
     if (c.result === "pass" || c.result === "short") {
@@ -146,18 +156,33 @@ function nearTransfers(
         e.standard === "nep245" &&
         e.event === "mt_transfer"
       ) {
-        for (const d of e.data as { new_owner_id?: string; token_ids?: string[]; amounts?: string[] }[]) {
+        for (const d of e.data as {
+          old_owner_id?: string;
+          new_owner_id?: string;
+          token_ids?: string[];
+          amounts?: string[];
+        }[]) {
           (d.token_ids ?? []).forEach((id, i) => {
             const a = d.amounts?.[i];
             if (d.new_owner_id && a && /^\d+$/.test(a))
-              out.push({ to: d.new_owner_id.toLowerCase(), assetId: id, amount: BigInt(a) });
+              out.push({
+                to: d.new_owner_id.toLowerCase(),
+                from: senderOf(d.old_owner_id),
+                assetId: id,
+                amount: BigInt(a),
+              });
           });
         }
       }
       if (row.recipient_type === "destination_chain" && e.standard === "nep141" && e.event === "ft_transfer") {
-        for (const d of e.data as { new_owner_id?: string; amount?: string }[]) {
+        for (const d of e.data as { old_owner_id?: string; new_owner_id?: string; amount?: string }[]) {
           if (d.new_owner_id && d.amount && /^\d+$/.test(d.amount))
-            out.push({ to: d.new_owner_id.toLowerCase(), assetId: `nep141:${o.executor}`, amount: BigInt(d.amount) });
+            out.push({
+              to: d.new_owner_id.toLowerCase(),
+              from: senderOf(d.old_owner_id),
+              assetId: `nep141:${o.executor}`,
+              amount: BigInt(d.amount),
+            });
         }
       }
     }
@@ -203,6 +228,7 @@ async function verifyNear(
       txHash: hash,
       blockRef: t.tx.receipts_outcome[0]?.block_hash ?? null,
       amount: c.amount,
+      sender: c.sender,
       details: { hash },
     };
     if (c.result !== "mismatch") return out;
@@ -227,7 +253,13 @@ async function verifySandbox(r: Rails, row: ExecutionRow, hashes: readonly strin
       best = pending({ hash, reason: "simulated tx not final" });
       continue;
     }
-    const transfers = tx.transfers.map((t) => ({ to: t.to.toLowerCase(), assetId: t.token, amount: BigInt(t.amount) }));
+    // SimTx transfers name no sender in spec 0.3.0 (change request); a `from` the sandbox sends anyway is used
+    const transfers = tx.transfers.map((t) => ({
+      to: t.to.toLowerCase(),
+      from: senderOf((t as { from?: unknown }).from),
+      assetId: t.token,
+      amount: BigInt(t.amount),
+    }));
     const c = compareTransfers(transfers, { recipient, assetId: row.destination_asset_id, expected });
     const out: VerifyOutcome = {
       result: c.result,
@@ -237,6 +269,7 @@ async function verifySandbox(r: Rails, row: ExecutionRow, hashes: readonly strin
       txHash: hash,
       blockRef: null,
       amount: c.amount,
+      sender: c.sender,
       details: { hash, simulated: true },
     };
     if (c.result !== "mismatch") return out;
@@ -354,6 +387,7 @@ export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20): Prom
         txHash: v.txHash,
         blockRef: v.blockRef,
         recipient: cur.destination_key.split("|")[1] as string,
+        sender: v.sender ?? null,
         assetId: cur.destination_asset_id,
         amount: v.amount,
         finality: v.finality,
