@@ -16,6 +16,7 @@ import { dualPrice, indicativeUsd, parCheck, pricesOf } from "../domain/pricing/
 import { routeClass, tokenContract } from "../domain/token-registry/registry.js";
 import type { Rails } from "./context.js";
 import { flag } from "./executions.js";
+import { readKillSwitch } from "./kill-switch.js";
 import { policyFor } from "./pricing.js";
 import { enabledTokens, publicAssets, tokenAnyMode } from "./tokens.js";
 import { executionView, pricedToken, type TokenRowDb } from "./views.js";
@@ -96,7 +97,7 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
   const lm = livemode ?? d.livemode;
   const amountOut = BigInt(q.amount_out);
   const crossChain = await flag(r, "cross_chain_enabled");
-  const quoting = lm ? (await flag(r, "quoting_enabled")) && r.treasury !== null : true;
+  const quoting = lm ? (await readKillSwitch(r)) === "released" && r.treasury !== null : true;
   const out: Option[] = [];
   const tokens = await enabledTokens(r, lm);
   const p = await policyFor(r, lm);

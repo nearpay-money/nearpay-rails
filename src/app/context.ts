@@ -7,6 +7,8 @@ import type { ChainProfiles } from "../domain/token-registry/chain-profiles.js";
 import type { RouteClass } from "../domain/token-registry/registry.js";
 import type { TierBLimits } from "../domain/verification/verification.js";
 import type { Screening } from "../infra/clients/compliance.js";
+import type { Nonces } from "../infra/clients/nonces.js";
+import type { SentinelClient } from "../infra/clients/sentinel.js";
 import type { DB } from "../infra/db/schema.js";
 import type { RouteProvider } from "../providers/port.js";
 import type { SandboxChains } from "../providers/sandbox/client.js";
@@ -107,6 +109,10 @@ export interface Rails {
   readonly profiles: ChainProfiles;
   readonly providers: Providers;
   readonly screening: Screening;
+  /** Sentinel `getKillSwitch` (spec 0.2.1); null when `NP_SENTINEL_URL` is unset (the state then waits for an event). */
+  readonly sentinel: SentinelClient | null;
+  /** Verifier nonces for Intents-source refund legs (spec 0.2.1 `RefundTransfer.nonce`). */
+  readonly nonces: Nonces;
   /** Live appFees / Intents fee recipient (owner-provided); null = live quoting refused. */
   readonly treasury: string | null;
   /** Test-mode fee recipient (sandbox only). */

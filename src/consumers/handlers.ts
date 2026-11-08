@@ -4,16 +4,17 @@
  * | Subject                                                | Effect                                  |
  * |--------------------------------------------------------|-----------------------------------------|
  * | evt.identity.settlement_destination.activated/disabled | upsert the watch-list (`watched_destinations`) |
- * | evt.sentinel.kill_switch.engaged/released              | `control_flags.quoting_enabled`         |
+ * | evt.sentinel.kill_switch.engaged/released              | `control_flags.quoting_enabled` (known) |
  *
  * Each handler records the event in the inbox in the same transaction and ignores events older than
  * the stored aggregate version.
  */
 import type { Envelope, EventHandler } from "@nearpay-internal/bus";
-import { deadLetterSink, enqueueJob, inboxHandler, type Kysely, sql } from "@nearpay-internal/db";
+import { deadLetterSink, enqueueJob, inboxHandler, type Kysely } from "@nearpay-internal/db";
 import { toUuid } from "@nearpay-internal/ids";
 import type { Subject } from "@nearpay-internal/spec";
 import type { Tx } from "../app/context.js";
+import { storeKillSwitch } from "../app/kill-switch.js";
 import type { DB } from "../infra/db/schema.js";
 
 interface DestinationObject {
@@ -60,13 +61,12 @@ async function watch(tx: Tx, e: Envelope, active: boolean): Promise<void> {
 
 async function killSwitch(tx: Tx, e: Envelope): Promise<void> {
   const k = e.data.object as unknown as { engaged: boolean; reason: string; actor: string };
-  const version = e.aggregate.version;
-  await sql`
-    insert into control_flags (name, value, reason, source_version, updated_at)
-    values ('quoting_enabled', ${!k.engaged}, ${`${k.engaged ? "kill switch engaged" : "released"} by ${k.actor}: ${k.reason}`.slice(0, 500)}, ${version}, now())
-    on conflict (name) do update set value = excluded.value, reason = excluded.reason,
-      source_version = excluded.source_version, updated_at = now()
-    where control_flags.source_version < excluded.source_version`.execute(tx);
+  // applies when newer than the stored version, or when the state was unknown (spec 0.2.1 boot read)
+  await storeKillSwitch(tx, {
+    engaged: k.engaged,
+    version: e.aggregate.version,
+    reason: `${k.engaged ? "kill switch engaged" : "released"} by ${k.actor}: ${k.reason}`,
+  });
 }
 
 export function railsHandlers(db: Kysely<DB>): Partial<Record<Subject, EventHandler>> {

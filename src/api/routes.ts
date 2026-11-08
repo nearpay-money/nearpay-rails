@@ -2,6 +2,7 @@
 import { listAssets } from "@nearpay/spec";
 import { ApiError, implement, type RouteBinding } from "@nearpay-internal/service";
 import {
+  abandonExecution as abandonExecutionRoute,
   createExecution as createExecutionRoute,
   createRefundExecution as createRefundExecutionRoute,
   estimateSettlement,
@@ -22,6 +23,7 @@ import {
   signalExecution as signalRoute,
   submitExecutionDepositTx,
 } from "@nearpay-internal/spec";
+import { abandonExecution } from "../app/abandon.js";
 import type { Rails } from "../app/context.js";
 import { estimate } from "../app/estimate.js";
 import { evidenceSummary, observationsPage } from "../app/evidence.js";
@@ -44,6 +46,7 @@ export function railsRoutes(r: Rails): RouteBinding[] {
   return [
     implement(createExecutionRoute, async (ctx) => createExecution(r, ctx.body)),
     implement(createRefundExecutionRoute, async (ctx) => createRefundExecution(r, ctx.body)),
+    implement(abandonExecutionRoute, async (ctx) => abandonExecution(r, ctx.params.id, ctx.body)),
     implement(getExecution, async (ctx) => executionView(await getExecutionRow(r, ctx.params.id))),
     implement(lookupExecutionByDeposit, async (ctx) => depositLookup(r, ctx.query)),
     implement(getInternalAsset, async (ctx) => assetView(r, ctx.params.asset_id, ctx.query.livemode)),

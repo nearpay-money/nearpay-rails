@@ -8,10 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sql } from "@nearpay-internal/db";
 import { newId, toUuid } from "@nearpay-internal/ids";
+import { bpsOf } from "@nearpay-internal/money";
 import {
+  createScreening,
   EvidenceSummary,
   Execution,
   FxRates,
+  getKillSwitch,
   ProviderObservationPage,
   SettlementEstimate,
 } from "@nearpay-internal/spec";
@@ -19,6 +22,7 @@ import { mintOpsToken } from "@nearpay-internal/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { archiveObservations } from "../../src/app/archive.js";
 import { refreshEcb, refreshSecondary } from "../../src/app/fx.js";
+import { readKillSwitch } from "../../src/app/kill-switch.js";
 import { settleWithEvidence } from "../../src/app/observations.js";
 import { refreshTokens } from "../../src/app/tokens.js";
 import { decodeObservations } from "../../src/archive/parquet.js";
@@ -26,6 +30,7 @@ import { fileStore } from "../../src/archive/store.js";
 import { parseEcbDaily } from "../../src/domain/pricing/ecb.js";
 import { isTargetClosingDay } from "../../src/domain/pricing/target-calendar.js";
 import { explorer } from "../../src/infra/clients/explorer.js";
+import { verifierNonces } from "../../src/infra/clients/nonces.js";
 import { coingeckoProvider } from "../../src/providers/prices/coingecko.js";
 import { readCursor } from "../../src/trackers/cursors.js";
 import { explorerOnce } from "../../src/trackers/explorer-feed/feed.js";
@@ -34,6 +39,7 @@ import { ACCOUNT, randomEvm, routeQuote } from "../support/requests.js";
 import { type Stack, startStack, USDC_ARB, USDC_BASE, USDC_NEAR } from "../support/stack.js";
 
 const TREASURY = "treasury.nearpay.near";
+const LIVE_SALT = "c0ffee01";
 const PAYER = "0x52908400098527886e0f7030069857d2e4169ee7";
 let s: Stack;
 let one: FakeOneClick;
@@ -51,7 +57,12 @@ function ecbFixture(): string {
 
 beforeAll(async () => {
   one = await fakeOneClick();
-  s = await startStack({ oneclick: one, config: { treasuryAccount: TREASURY }, tracker: true });
+  s = await startStack({
+    oneclick: one,
+    config: { treasuryAccount: TREASURY },
+    tracker: true,
+    nonces: verifierNonces({ rpcUrls: [], readSalt: async () => LIVE_SALT }),
+  });
   await refreshTokens(s.rails, true);
   await s.admin.db.updateTable("tokens").set({ price_updated_at: new Date() }).where("livemode", "=", true).execute();
   await refreshEcb(s.rails, { daily: async () => parseEcbDaily(ecbFixture()) });
@@ -612,6 +623,199 @@ describe("Explorer feed (owner token)", () => {
       expect(cur2?.pages?.inflight).toBeUndefined();
     } finally {
       await ex.stop();
+    }
+  });
+});
+
+describe("spec 0.2.1", () => {
+  const get = async (id: string) => Execution.parse((await s.call("GET", `/internal/executions/${id}`)).body);
+  async function until(id: string, pred: (x: Execution) => boolean, ms = 20_000) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const x = await get(id);
+      if (pred(x)) return x;
+      if (Date.now() > end) throw new Error(`stuck in ${x.state}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  const payment = async () => {
+    const r = await s.call("POST", "/internal/executions", {
+      body: routeQuote({
+        livemode: true,
+        origin: { asset_id: USDC_ARB, chain: "eip155:42161", refund_to: PAYER, refund_type: "origin_chain" },
+      }),
+    });
+    if (r.status !== 201) throw new Error(JSON.stringify(r.body));
+    return Execution.parse(r.body);
+  };
+  const outboxOf = async (id: string) =>
+    (
+      await s.admin.db
+        .selectFrom("outbox")
+        .select(["subject", "payload"])
+        .where(sql<boolean>`payload->'aggregate'->>'id' = ${id}`)
+        .orderBy("created_at")
+        .execute()
+    ).map((r) => r.subject);
+
+  it("decimals, fee share of amount_in, deposited amount and the observed route fee (provider appFees)", async () => {
+    const x = await payment();
+    expect(x.origin.decimals).toBe(6);
+    expect(x.settlement.decimals).toBe(6);
+    const amountIn = BigInt(x.deposit?.amount_in as string);
+    // the payer bears the fee (FEE_SCHEDULE default): NearPay's share of amount_in at the applied bps
+    expect(x.deposit?.fee_amount_in).toBe(bpsOf(amountIn, x.applied_fee_bps).toString());
+    expect(x.observed_fee).toBeNull();
+    expect(x.deposited_amount).toBeNull();
+    const address = x.deposit?.address as string;
+    one.statuses.set(address, {
+      status: "KNOWN_DEPOSIT_TX",
+      swapDetails: {
+        depositedAmount: amountIn.toString(),
+        originChainTxHashes: [{ hash: `0x${"ab".repeat(32)}`, explorerUrl: "" }],
+      },
+    });
+    await s.call("POST", `/internal/executions/${x.id}/signals`, { body: { type: "payer_sent" } });
+    const d = await until(x.id, (e) => e.state === "deposit_detected");
+    expect(d.deposited_amount).toBe(amountIn.toString());
+    expect(d.observed_fee).toBeNull(); // not settled yet
+    one.statuses.set(address, {
+      status: "SUCCESS",
+      swapDetails: {
+        amountIn: amountIn.toString(),
+        depositedAmount: amountIn.toString(),
+        amountOut: x.settlement.expected,
+      },
+    });
+    await s.admin.db
+      .updateTable("executions")
+      .set({ next_poll_at: new Date() })
+      .where("id", "=", toUuid(x.id, "ex"))
+      .execute();
+    const v = await until(x.id, (e) => e.state === "verifying");
+    // the fake echoes the requested fee split (treasury + 1Click): together the applied bps
+    expect(v.observed_fee).toEqual({ amount: bpsOf(amountIn, x.applied_fee_bps).toString(), asset_id: USDC_ARB });
+    expect(Execution.safeParse(v).success).toBe(true);
+  });
+
+  it("refund legs carry no app fee: fee_amount_in 0, observed_fee null", async () => {
+    const x = await refund();
+    expect(x.deposit?.fee_amount_in).toBe("0");
+    expect(x.observed_fee).toBeNull();
+    expect(x.origin.decimals).toBe(6);
+  });
+
+  it("abandonExecution: a pre-deposit refund leg → expired_unpaid, tracked 24 h, one event; repeats unchanged", async () => {
+    const x = await refund();
+    const t0 = Date.now();
+    const r = await s.call("POST", `/internal/executions/${x.id}/abandon`, {
+      body: { reason: "execution_mismatch", note: "amount differs" },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    const a = Execution.parse(r.body);
+    expect(a).toMatchObject({ state: "expired_unpaid", abandon_reason: "execution_mismatch", version: x.version + 1 });
+    expect(Date.parse(a.abandoned_at as string)).toBeGreaterThanOrEqual(t0 - 1000);
+    expect(Date.parse(a.deadline)).toBeLessThanOrEqual(Date.now());
+    const row = await s.admin.db
+      .selectFrom("executions")
+      .select(["tracking_until", "abandon_note", "terminal_at"])
+      .where("id", "=", toUuid(x.id, "ex"))
+      .executeTakeFirstOrThrow();
+    expect((row.tracking_until as Date).getTime() - Date.parse(a.abandoned_at as string)).toBe(24 * 3_600_000);
+    expect(row).toMatchObject({ abandon_note: "amount differs", terminal_at: null });
+    const t = await s.admin.db
+      .selectFrom("execution_transitions")
+      .select(["from_state", "to_state", "cause"])
+      .where("execution_id", "=", toUuid(x.id, "ex"))
+      .orderBy("created_at")
+      .execute();
+    expect(t.at(-1)).toMatchObject({ from_state: "awaiting_deposit", to_state: "expired_unpaid" });
+    const again = await s.call("POST", `/internal/executions/${x.id}/abandon`, { body: { reason: "superseded" } });
+    expect(again.status).toBe(200);
+    expect(Execution.parse(again.body)).toMatchObject({ version: a.version, abandon_reason: "execution_mismatch" });
+    expect((await outboxOf(x.id)).filter((sub) => sub === "evt.rails.execution.updated").length).toBe(2); // created + abandoned
+  });
+
+  it("abandonExecution refuses a payment execution, a leg with a deposit, and needs rails.executions.write", async () => {
+    const p = await payment();
+    const r1 = await s.call("POST", `/internal/executions/${p.id}/abandon`, { body: { reason: "leg_failed" } });
+    expect([r1.status, error(r1).code]).toEqual([409, "state_conflict"]);
+    const x = await refund();
+    await s.admin.db
+      .updateTable("executions")
+      .set({ deposit_tx_hashes: [`0x${"cd".repeat(32)}`] })
+      .where("id", "=", toUuid(x.id, "ex"))
+      .execute();
+    const r2 = await s.call("POST", `/internal/executions/${x.id}/abandon`, { body: { reason: "leg_failed" } });
+    expect([r2.status, error(r2).code]).toEqual([409, "state_conflict"]);
+    expect((await get(x.id)).abandoned_at).toBeNull();
+    const r3 = await s.call("POST", `/internal/executions/${x.id}/abandon`, {
+      body: { reason: "leg_failed" },
+      service: "sentinel",
+    });
+    expect(r3.status).toBe(403);
+  });
+
+  it("RefundTransfer.nonce: the Verifier salt ‖ 28 random bytes on Intents-source legs", async () => {
+    const x = await refund({
+      source: { asset_id: USDC_NEAR, type: "intents_account", chain: "near:mainnet", address: "merchant.near" },
+    });
+    const nonce = x.refund?.transfer?.nonce as string;
+    const bytes = Buffer.from(nonce, "base64");
+    expect(bytes).toHaveLength(32);
+    expect(bytes.subarray(0, 4).toString("hex")).toBe(LIVE_SALT);
+    const y = await refund({
+      source: { asset_id: USDC_NEAR, type: "intents_account", chain: "near:mainnet", address: "merchant.near" },
+    });
+    expect(y.refund?.transfer?.nonce).not.toBe(nonce);
+  });
+
+  it("an owner-overridden recipient (screen: true) is screened fresh; others use the cache", async () => {
+    await refund({ screen: true });
+    expect(s.compliance.callsTo(createScreening).at(-1)?.body).toMatchObject({ context: "refund", fresh: true });
+    await refund();
+    expect(s.compliance.callsTo(createScreening).at(-1)?.body).not.toHaveProperty("fresh");
+  });
+
+  it("kill switch: unknown refuses live quoting; sentinel's state is read and stored with its version", async () => {
+    const setUnknown = () =>
+      s.admin.db
+        .updateTable("control_flags")
+        .set({ known: false, value: true, source_version: 0 })
+        .where("name", "=", "quoting_enabled")
+        .execute();
+    try {
+      await setUnknown();
+      s.killSwitch.fail = true;
+      expect(await readKillSwitch(s.rails, { force: true })).toBe("unknown");
+      const r1 = await s.call("POST", "/internal/refund_executions", { body: refundBody() });
+      expect([r1.status, error(r1).code]).toEqual([503, "rail_unavailable"]);
+      expect((r1.body as { error: { message: string } }).error.message).toMatch(/unknown/);
+      // sentinel answers: engaged at version 7 → stored, live quoting refused as engaged
+      s.killSwitch.fail = false;
+      Object.assign(s.killSwitch, { engaged: true, version: 7 });
+      expect(await readKillSwitch(s.rails, { force: true })).toBe("engaged");
+      const r2 = await s.call("POST", "/internal/executions", {
+        body: routeQuote({
+          livemode: true,
+          origin: { asset_id: USDC_ARB, chain: "eip155:42161", refund_to: PAYER, refund_type: "origin_chain" },
+        }),
+      });
+      expect([r2.status, error(r2).code]).toEqual([503, "rail_unavailable"]);
+      const flag = await s.admin.db
+        .selectFrom("control_flags")
+        .selectAll()
+        .where("name", "=", "quoting_enabled")
+        .executeTakeFirstOrThrow();
+      expect(flag).toMatchObject({ known: true, value: false, source_version: 7 });
+      // once known, a read never overrides the stored state (only newer events do)
+      Object.assign(s.killSwitch, { engaged: false, version: 8 });
+      expect(await readKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(s.sentinel.callsTo(getKillSwitch).length).toBeGreaterThan(0);
+    } finally {
+      Object.assign(s.killSwitch, { engaged: false, version: 0, fail: false });
+      await setUnknown();
+      expect(await readKillSwitch(s.rails, { force: true })).toBe("released");
     }
   });
 });

@@ -102,3 +102,36 @@ export function binding(b: BindingInput): string {
     .digest();
   return `np1:${bs58.encode(digest)}`;
 }
+
+const UINT = /^\d{1,78}$/;
+
+/**
+ * NearPay's fee share of a route quote's `amount_in` (spec 0.2.1 `ExecutionDeposit.fee_amount_in`, display only):
+ * `bpsOf(amount_in, fee bps)` in the origin asset when the payer bears the fee (1Click takes app fees from the
+ * input), `0` when the merchant bears it or the leg has no fee, null when `amount_in` is not an integer.
+ */
+export function feeShareOfAmountIn(amountIn: string | null, bps: number, bearer: "payer" | "merchant"): bigint | null {
+  if (amountIn === null || !UINT.test(amountIn)) return null;
+  if (bps <= 0 || bearer === "merchant") return 0n;
+  return bpsOf(BigInt(amountIn), bps);
+}
+
+/**
+ * The app fee the provider reports for a settled route (spec 0.2.1 `Execution.observed_fee`): the total bps of the
+ * reported `appFees` (the treasury's entry plus 1Click's split of it — together the fee NearPay charged) applied to
+ * the provider's settled `amountIn`, in the origin asset (the same rule as payments' statement estimate). Null when
+ * the provider reports no fee list or no positive settled amount (unknown, never guessed).
+ */
+export function observedRouteFee(
+  amountIn: string | null | undefined,
+  appFees: readonly { readonly fee: number }[] | null | undefined,
+): bigint | null {
+  if (!appFees || !amountIn || !UINT.test(amountIn) || BigInt(amountIn) <= 0n) return null;
+  let bps = 0;
+  for (const f of appFees) {
+    if (!Number.isInteger(f.fee) || f.fee < 0 || f.fee > 10_000) return null;
+    bps += f.fee;
+  }
+  if (bps > 10_000) return null;
+  return bpsOf(BigInt(amountIn), bps);
+}

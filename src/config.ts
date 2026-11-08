@@ -30,6 +30,8 @@ const shared = {
   identityUrl: url(["http:", "https:"]),
   serviceClientSecret: secret(),
   complianceUrl: url(["http:", "https:"]),
+  /** Sentinel (`getKillSwitch` at boot, spec 0.2.1). Unset: the kill-switch state waits for an event (live quoting refused until then). */
+  sentinelUrl: url(["http:", "https:"]).optional(),
   /** Test mode (nearpay-sandbox); without it test-mode executions are refused. */
   sandboxBaseUrl: url(["http:", "https:"]).optional(),
   sandboxSigningPubkey: z.string().min(32).optional(),

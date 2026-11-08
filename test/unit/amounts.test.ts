@@ -149,3 +149,57 @@ describe("poll schedule (§8.4)", () => {
     expect(isExpired({ ...e, state: "settling" })).toBe(false);
   });
 });
+
+describe("spec 0.2.1 fee helpers", () => {
+  it("feeShareOfAmountIn: payer pays bps of amount_in; merchant or fee-free 0; malformed null", async () => {
+    const { feeShareOfAmountIn } = await import("../../src/domain/execution/amounts.js");
+    expect(feeShareOfAmountIn("1000000", 50, "payer")).toBe(5000n);
+    expect(feeShareOfAmountIn("1000001", 50, "payer")).toBe(5001n); // ceil, like payments' estimate
+    expect(feeShareOfAmountIn("1000000", 50, "merchant")).toBe(0n);
+    expect(feeShareOfAmountIn("1000000", 0, "payer")).toBe(0n);
+    expect(feeShareOfAmountIn(null, 50, "payer")).toBeNull();
+    expect(feeShareOfAmountIn("1.5", 50, "payer")).toBeNull();
+  });
+
+  it("observedRouteFee: total reported bps on the settled amountIn; invalid entries make it unknown", async () => {
+    const { observedRouteFee } = await import("../../src/domain/execution/amounts.js");
+    expect(observedRouteFee("2000000", [{ fee: 25 }, { fee: 25 }])).toBe(10000n);
+    expect(observedRouteFee("2000000", [])).toBe(0n);
+    expect(observedRouteFee("2000000", undefined)).toBeNull();
+    expect(observedRouteFee(null, [{ fee: 25 }])).toBeNull();
+    expect(observedRouteFee("0", [{ fee: 25 }])).toBeNull();
+    expect(observedRouteFee("2000000", [{ fee: -1 }])).toBeNull();
+    expect(observedRouteFee("2000000", [{ fee: 1.5 }])).toBeNull();
+    expect(observedRouteFee("2000000", [{ fee: 6000 }, { fee: 6000 }])).toBeNull();
+  });
+});
+
+describe("spec 0.2.1 Verifier nonces", () => {
+  it("test mode uses the sandbox salt; live reads current_salt once per minute; a bad salt throws", async () => {
+    const { verifierNonces, SANDBOX_SALT, SALT_TTL_MS } = await import("../../src/infra/clients/nonces.js");
+    let now = 0;
+    let reads = 0;
+    let salt = "0a0b0c0d";
+    const n = verifierNonces({
+      rpcUrls: [],
+      now: () => now,
+      readSalt: async () => {
+        reads++;
+        return salt;
+      },
+    });
+    const hex = (b64: string) => Buffer.from(b64, "base64").toString("hex");
+    const t = await n.fresh(false);
+    expect(Buffer.from(t, "base64")).toHaveLength(32);
+    expect(hex(t).slice(0, 8)).toBe(SANDBOX_SALT);
+    expect(reads).toBe(0);
+    const a = await n.fresh(true);
+    const b = await n.fresh(true);
+    expect(hex(a).slice(0, 8)).toBe("0a0b0c0d");
+    expect(a).not.toBe(b);
+    expect(reads).toBe(1);
+    now = SALT_TTL_MS + 1;
+    salt = "nothex!!";
+    await expect(n.fresh(true)).rejects.toThrow(/current_salt/);
+  });
+});

@@ -223,6 +223,10 @@ describe("intents_transfer (sandbox Verifier + sandbox feed)", () => {
       finality: "final",
     });
     expect(done.evidence?.tx_hash).toBe((ex.body as { tx_hash: string }).tx_hash);
+    // spec 0.2.1: the executed payload's fee transfer is the observed fee; the payer moved amount + fee
+    expect(done.observed_fee).toEqual({ amount: req.fee_amount, asset_id: USDC_NEAR });
+    expect(done.deposited_amount).toBe(total);
+    expect(done.settlement.decimals).toBe(6);
   });
 
   it("an unpaid Intents requirement expires after its deadline", async () => {

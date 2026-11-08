@@ -32,6 +32,7 @@ import { routeClass as classify, type RouteClass } from "../domain/token-registr
 import type { RefundRow } from "../infra/db/schema.js";
 import type { Rails } from "./context.js";
 import { byKey, flag, pricingApiError, railUnavailable, replay, unsupported } from "./executions.js";
+import { readKillSwitch } from "./kill-switch.js";
 import { emitExecution } from "./ledger.js";
 import { observationValues } from "./observations.js";
 import { policyFor, pricedToken } from "./pricing.js";
@@ -184,6 +185,8 @@ async function screenRecipient(r: Rails, b: RefundBody, x: Leg): Promise<void> {
     livemode: b.livemode,
     amountUsdMicros: x.amountUsdMicros,
     context: "refund",
+    // spec 0.2.1 (CR-22-RL-01): an owner-overridden recipient is screened now, never from the cache
+    ...(b.screen ? { fresh: true } : {}),
   });
   if (out.kind === "block") throw new ApiError("screening_blocked", { param: "recipient.address" });
   if (out.kind === "unavailable") {
@@ -202,7 +205,10 @@ export async function createRefundExecution(r: Rails, b: RefundBody): Promise<Ex
   }
   if (b.livemode) {
     // the kill switch blocks new live refund legs too (lead decision, payments §17 item 16)
-    if (!(await flag(r, "quoting_enabled"))) throw railUnavailable("kill switch engaged");
+    // spec 0.2.1: an unknown kill-switch state (never read, no event) refuses live quoting too (fail closed)
+    const ks = await readKillSwitch(r);
+    if (ks !== "released")
+      throw railUnavailable(ks === "engaged" ? "kill switch engaged" : "kill switch state unknown");
     if (!r.treasury) throw railUnavailable("live mode is not configured");
   }
   if (b.method === "route_quote") {
@@ -212,6 +218,22 @@ export async function createRefundExecution(r: Rails, b: RefundBody): Promise<Ex
   const x = await prepareLeg(r, b, accountId);
   await screenRecipient(r, b, x);
   return b.method === "intents_transfer" ? createIntentsLeg(r, b, x) : createRouteLeg(r, b, x);
+}
+
+/**
+ * The Verifier nonce of an Intents-source leg (spec 0.2.1 `RefundTransfer.nonce`), issued before the transaction
+ * (no I/O under locks). A live salt that cannot be read gives null: payments then derives the nonce itself.
+ */
+async function issueNonce(r: Rails, livemode: boolean): Promise<string | null> {
+  try {
+    return await r.nonces.fresh(livemode);
+  } catch (e) {
+    r.log.warn(
+      { err: e instanceof Error ? e.message : String(e) },
+      "Verifier salt unreadable: refund leg without nonce",
+    );
+    return null;
+  }
 }
 
 function referenceJson(b: RefundBody): string {
@@ -241,6 +263,8 @@ function baseValues(b: RefundBody, x: Leg, now: Date) {
     destination_chain: b.recipient.chain,
     destination_key: destinationKey(b.recipient.chain, x.recipientNorm, x.d.asset_id),
     route_class: x.route,
+    origin_decimals: x.s.decimals,
+    destination_decimals: x.d.decimals,
     applied_fee_bps: 0,
     fee_recipient: null,
     amount_tag: "0",
@@ -349,6 +373,7 @@ async function insertRouteLeg(
   const depositAddress = quote.depositAddress as string;
   const sends = BigInt(quote.amountIn);
   const expected = legExpected(b.swap_type, quote);
+  const nonce = x.sourceIntents ? await issueNonce(r, b.livemode) : null;
   const bind = x.sourceIntents
     ? bindingOf({
         executionId: x.id,
@@ -374,6 +399,7 @@ async function insertRouteLeg(
           amount: sends.toString(),
           memo: bind,
           deadline: x.deadline.toISOString(),
+          nonce,
         }
       : null,
   };
@@ -396,6 +422,7 @@ async function insertRouteLeg(
           deposit_memo: quote.depositMemo ?? null,
           amount_in: quote.amountIn,
           min_amount_in: quote.minAmountIn,
+          fee_amount_in: "0", // refund legs carry no app fee (spec 0.2.1)
           binding: bind,
           time_when_inactive: quote.timeWhenInactive ? new Date(quote.timeWhenInactive) : null,
           next_poll_at: new Date(
@@ -448,6 +475,7 @@ async function insertRouteLeg(
 }
 
 async function createIntentsLeg(r: Rails, b: RefundBody, x: Leg): Promise<Execution> {
+  const nonce = await issueNonce(r, b.livemode);
   const now = new Date(r.now());
   const bind = bindingOf({
     executionId: x.id,
@@ -471,6 +499,7 @@ async function createIntentsLeg(r: Rails, b: RefundBody, x: Leg): Promise<Execut
       amount: x.amount.toString(),
       memo: bind,
       deadline: x.deadline.toISOString(),
+      nonce,
     },
   };
   try {

@@ -14,7 +14,9 @@
  * `explorer_status` (Tier-B cross-check, §8.10). Rows of unknown deposit addresses are ignored and counted.
  */
 import type { Rails } from "../../app/context.js";
+import { applyChange, lockExecution } from "../../app/ledger.js";
 import { observationValues } from "../../app/observations.js";
+import { observedRouteFee } from "../../domain/execution/amounts.js";
 import {
   ALL_STATUSES,
   type Explorer,
@@ -62,7 +64,16 @@ export async function applyRows(r: Rails, livemode: boolean, rows: readonly Expl
   const addresses = [...new Set(rows.map((x) => x.depositAddress))];
   const execs = await r.db
     .selectFrom("executions")
-    .select(["id", "deposit_address", "deposit_memo", "explorer_status", "terminal_at"])
+    .select([
+      "id",
+      "kind",
+      "origin_asset_id",
+      "observed_fee_amount",
+      "deposit_address",
+      "deposit_memo",
+      "explorer_status",
+      "terminal_at",
+    ])
     .where("livemode", "=", livemode)
     .where("provider", "=", livemode ? "oneclick" : "sandbox")
     .where("deposit_address", "in", addresses)
@@ -85,6 +96,12 @@ export async function applyRows(r: Rails, livemode: boolean, rows: readonly Expl
     if (row.status === x.explorer_status) continue;
     const now = new Date(r.now());
     const open = x.terminal_at === null;
+    // spec 0.2.1: a settled payment route's app fee as the Explorer reports it (`appFees` on `amountIn`), when
+    // rails does not know it yet (display/reconciliation data only: never moves a state)
+    const fee =
+      row.status === "SUCCESS" && x.kind === "payment" && x.observed_fee_amount === null
+        ? observedRouteFee(row.amountIn, row.appFees)
+        : null;
     await r.db.transaction().execute(async (tx) => {
       await tx
         .insertInto("provider_observations")
@@ -99,6 +116,18 @@ export async function applyRows(r: Rails, livemode: boolean, rows: readonly Expl
         })
         .where("id", "=", x.id)
         .execute();
+      if (fee !== null) {
+        // a material change of the execution view: version + `evt.rails.execution.updated` (ledger)
+        const cur = await lockExecution(tx, x.id);
+        if (cur && cur.observed_fee_amount === null)
+          await applyChange(
+            r,
+            tx,
+            cur,
+            { observedFee: { amount: fee, assetId: x.origin_asset_id } },
+            { cause: "explorer appFees", actor: "explorer" },
+          );
+      }
     });
     recorded++;
     if (open) nudged++;

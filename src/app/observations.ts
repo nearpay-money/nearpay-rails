@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { explorerTxUrl, getChain } from "@nearpay-internal/chains";
 import { uuidv7 } from "@nearpay-internal/ids";
 import type { OneClickStatusResponse } from "@nearpay-internal/spec";
+import { observedRouteFee } from "../domain/execution/amounts.js";
 import { isExpired, LATE_REFUND_WINDOW_MS, nextPollAt } from "../domain/execution/schedule.js";
 import { decideEvidence, decideProviderStatus, type HeldReason, type State } from "../domain/execution/state.js";
 import type { VerificationResult } from "../domain/verification/verification.js";
@@ -104,6 +105,14 @@ export async function applyStatus(
     destinationTxHashes: merge(cur.destination_tx_hashes, hashes(d.destinationChainTxHashes)),
   };
   if (s.status === "SUCCESS") change.providerAmountOut = amount(d.amountOut);
+  // spec 0.2.1: what the payer deposited (provider `depositedAmount`) and, for a settled payment route, the app
+  // fee the provider reports (its echoed `appFees` on the settled `amountIn`); unknown stays unknown
+  const deposited = amount(d.depositedAmount);
+  if (deposited !== null && deposited > 0n) change.depositedAmount = deposited;
+  if (s.status === "SUCCESS" && cur.kind === "payment" && cur.observed_fee_amount === null) {
+    const fee = observedRouteFee(d.amountIn, s.quoteResponse?.quoteRequest?.appFees);
+    if (fee !== null) change.observedFee = { amount: fee, assetId: cur.origin_asset_id };
+  }
   if (s.status === "REFUNDED" || (d.refundedAmount && amount(d.refundedAmount) !== 0n)) {
     const ref = amount(d.refundedAmount);
     if (ref !== null) change.refundedAmount = ref;
@@ -162,6 +171,9 @@ export interface EvidenceInput {
   readonly amount: bigint;
   readonly finality: "final" | "finalized" | "confirmed";
   readonly details?: Record<string, unknown>;
+  /** spec 0.2.1 — `intents_transfer`: the executed payload's fee transfer and the payer's total (incl. fee). */
+  readonly observedFee?: { readonly amount: bigint; readonly assetId: string } | null;
+  readonly depositedAmount?: bigint | null;
 }
 
 function explorerUrl(chain: string, tx: string): string | null {
@@ -229,7 +241,13 @@ export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: Evid
     r,
     tx,
     cur,
-    { state: "succeeded", settledAmount: e.amount, evidence },
+    {
+      state: "succeeded",
+      settledAmount: e.amount,
+      evidence,
+      ...(e.observedFee !== undefined && cur.kind === "payment" ? { observedFee: e.observedFee } : {}),
+      ...(e.depositedAmount !== undefined ? { depositedAmount: e.depositedAmount } : {}),
+    },
     {
       cause: e.result === "short" ? "evidence: short settlement" : `evidence: ${e.source}`,
       actor: e.source === "provider" ? "verifier" : (e.source as ChangeMeta["actor"]),
