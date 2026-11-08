@@ -1,4 +1,4 @@
-/** Kysely table types (migrations/0001_rails.sql, 0002_stage2.sql). Numeric columns travel as decimal strings. */
+/** Kysely table types (migrations/0001_rails.sql, 0002_stage2.sql, 0003_spec_0_2_1.sql). Numeric columns travel as decimal strings. */
 import type { ColumnType, KitTables } from "@nearpay-internal/db";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -111,6 +111,8 @@ export type RefundRow = {
     amount: string;
     memo: string;
     deadline: string;
+    /** spec 0.2.1: Verifier nonce issued by rails (salt ‖ 28 random bytes); null when the salt was unreadable. */
+    nonce?: string | null;
   } | null;
 };
 
@@ -193,6 +195,16 @@ export interface ExecutionsTable {
   refund: NullableJson<RefundRow>;
   explorer_status: Opt<string>;
   explorer_seen_at: NullableTimestamp;
+  // spec 0.2.1 (0003)
+  observed_fee_amount: NullableNumeric;
+  observed_fee_asset: Opt<string>;
+  deposited_amount: NullableNumeric;
+  fee_amount_in: NullableNumeric;
+  origin_decimals: Opt<number>;
+  destination_decimals: Opt<number>;
+  abandoned_at: NullableTimestamp;
+  abandon_reason: Opt<string>;
+  abandon_note: Opt<string>;
 }
 
 export interface AmountTagsTable {
@@ -282,6 +294,8 @@ export interface ControlFlagsTable {
   reason: string | null;
   source_version: ColumnType<number, number | undefined, number>;
   updated_at: Timestamp;
+  /** spec 0.2.1 (0003): false until sentinel's kill-switch state is known (boot read or an event). */
+  known: ColumnType<boolean, boolean | undefined, boolean>;
 }
 
 export interface DestinationMinimumsTable {

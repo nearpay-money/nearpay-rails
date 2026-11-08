@@ -47,6 +47,8 @@ import { complianceScreening, type Screening } from "../infra/clients/compliance
 import { type EvmRpc, evmRpc } from "../infra/clients/evm.js";
 import { type Explorer, explorer as explorerClient, sandboxExplorer } from "../infra/clients/explorer.js";
 import { type Neardata, type NearRpc, neardata as neardataClient, nearRpc } from "../infra/clients/near.js";
+import { type Nonces, verifierNonces } from "../infra/clients/nonces.js";
+import { type SentinelClient, sentinelClient } from "../infra/clients/sentinel.js";
 import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
 import type { DB } from "../infra/db/schema.js";
 import { ecbProvider, type FxFetch } from "../providers/fx/ecb.js";
@@ -63,6 +65,7 @@ import { verifierTask } from "../verifiers/verifier.js";
 import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
 import { alertStale, refreshEcb, refreshSecondary } from "./fx.js";
+import { killSwitchBootTask } from "./kill-switch.js";
 import { refreshTokens } from "./tokens.js";
 
 export const DEFAULT_CHAINS_FILE = fileURLToPath(new URL("../../config/chains.yaml", import.meta.url));
@@ -77,6 +80,8 @@ export interface ServiceDeps {
   serviceToken?: () => Promise<string>;
   providers?: Providers;
   screening?: Screening;
+  sentinel?: SentinelClient | null;
+  nonces?: Nonces;
   budgets?: Budgets;
   fetch?: typeof fetch;
   random?: () => number;
@@ -147,6 +152,19 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string): Built {
       complianceScreening({
         baseUrl: config.complianceUrl,
         serviceToken,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      }),
+    sentinel:
+      deps.sentinel !== undefined
+        ? deps.sentinel
+        : config.sentinelUrl
+          ? sentinelClient({ baseUrl: config.sentinelUrl, serviceToken, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
+          : null,
+    nonces:
+      deps.nonces ??
+      verifierNonces({
+        rpcUrls: config.nearRpcUrls,
+        contract: config.intentsContract,
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
       }),
     treasury: config.treasuryAccount ?? null,
@@ -220,6 +238,8 @@ export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service:
     readiness: readiness(b.database),
   });
   attach(b, service, deps);
+  // spec 0.2.1: learn sentinel's kill-switch state at boot (live quoting is refused while it is unknown)
+  service.addBackground(killSwitchBootTask(b.rails));
   return { service, rails: b.rails };
 }
 
@@ -320,6 +340,7 @@ export async function createFeeds(
   service.addBackground(
     domainConsumersTask({ bus, consumer: "rails", handlers, onDeadLetter: deadLetters(db.db), onError }),
   );
+  service.addBackground(killSwitchBootTask(r));
   const archive =
     deps.archive !== undefined
       ? deps.archive

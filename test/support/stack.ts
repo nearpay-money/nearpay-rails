@@ -13,12 +13,13 @@ import { type Bus, connectBus, type Envelope, publish } from "@nearpay-internal/
 import { createDb, type Database, migrate } from "@nearpay-internal/db";
 import { newId } from "@nearpay-internal/ids";
 import type { Service } from "@nearpay-internal/service";
-import { createScreening, INTERNAL_ROUTES } from "@nearpay-internal/spec";
+import { createScreening, getKillSwitch, INTERNAL_ROUTES } from "@nearpay-internal/spec";
 import {
   type EventProbe,
   eventProbe,
   type MockPeer,
   mintServiceToken,
+  mockError,
   mockPeer,
   provisionServiceDatabase,
   type Started,
@@ -30,8 +31,10 @@ import {
 } from "@nearpay-internal/testing";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import type { Rails } from "../../src/app/context.js";
+import { readKillSwitch } from "../../src/app/kill-switch.js";
 import { createApi, createFeeds, createTracker, type FeedsDeps, type TrackerDeps } from "../../src/app/services.js";
 import type { ApiConfig, FeedsConfig } from "../../src/config.js";
+import type { Nonces } from "../../src/infra/clients/nonces.js";
 import { MIGRATIONS_DIR } from "../../src/infra/db/migrations.js";
 import type { DB } from "../../src/infra/db/schema.js";
 import { oneClickProvider } from "../../src/providers/oneclick/client.js";
@@ -135,6 +138,9 @@ export interface Stack {
   readonly rails: Rails;
   readonly apiUrl: string;
   readonly compliance: MockPeer;
+  /** Sentinel mock answering `getKillSwitch` (spec 0.2.1) with {@link Stack.killSwitch}. */
+  readonly sentinel: MockPeer;
+  readonly killSwitch: { engaged: boolean; version: number; fail: boolean };
   readonly sandbox: Sandbox | null;
   readonly nats: (Started & { monitorUrl: string }) | null;
   readonly bus: Bus | null;
@@ -156,6 +162,10 @@ export interface StackOptions {
   feeds?: boolean | FeedsDeps;
   oneclick?: FakeOneClick;
   config?: Partial<ApiConfig>;
+  /** Verifier nonces (spec 0.2.1); default: the service's own (live salt over the unreachable test RPC). */
+  nonces?: Nonces;
+  /** Leave the kill-switch state unknown at start (tests of the boot read). */
+  killSwitchUnknown?: boolean;
 }
 
 export async function startStack(o: StackOptions = {}): Promise<Stack> {
@@ -186,6 +196,19 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     post_screen_required: false,
   }));
 
+  const killSwitch = { engaged: false, version: 0, fail: false };
+  const sentinel = await mockPeer({ service: "sentinel", routes: INTERNAL_ROUTES });
+  sentinel.on(getKillSwitch, async () => {
+    if (killSwitch.fail) throw mockError("rail_unavailable");
+    return {
+      engaged: killSwitch.engaged,
+      reason: "test",
+      actor: "sentinel",
+      updated_at: new Date().toISOString(),
+      version: killSwitch.version,
+    };
+  });
+
   const serviceToken = testServiceToken("rails");
   const providers = {
     live: o.oneclick
@@ -205,6 +228,7 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     identityUrl: "http://127.0.0.1:9",
     serviceClientSecret: "unused",
     complianceUrl: compliance.url,
+    sentinelUrl: sentinel.url,
     oneclickBaseUrl: o.oneclick?.url ?? "http://127.0.0.1:9",
     testTreasuryAccount: TREASURY,
     intentsContract: "intents.near",
@@ -241,11 +265,13 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     ...(sandbox ? { sandboxBaseUrl: sandbox.url, sandboxSigningPubkey: sandbox.signingPubkey } : {}),
     ...(o.config as object),
   } as FeedsConfig;
-  const deps = { keys: testKeySource(), serviceToken, providers };
+  const deps = { keys: testKeySource(), serviceToken, providers, ...(o.nonces ? { nonces: o.nonces } : {}) };
 
   const apiDb = createDb<DB>({ url: appUrl, applicationName: "rails-api-test" });
   const { service: api, rails } = createApi(config, { ...deps, database: apiDb });
   const { port } = await api.start();
+  // the boot read runs in the background; make the state known before any test quotes live (spec 0.2.1)
+  if (o.killSwitchUnknown !== true) await readKillSwitch(rails, { force: true });
 
   let tracker: Stack["tracker"] = null;
   if (o.tracker) {
@@ -289,6 +315,8 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     rails,
     apiUrl,
     compliance,
+    sentinel,
+    killSwitch,
     sandbox,
     nats,
     bus,
@@ -321,6 +349,7 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
       await api.stop().catch(() => {});
       await bus?.close().catch(() => {});
       await compliance.stop().catch(() => {});
+      await sentinel.stop().catch(() => {});
       for (const c of sandbox?.containers ?? []) await c.stop().catch(() => {});
       await new Promise<void>((r) => jwks.close(() => r()));
       await admin.close();

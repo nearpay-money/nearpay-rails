@@ -24,6 +24,11 @@ export interface Change {
   destinationTxHashes?: string[];
   evidence?: EvidenceRow | null;
   failureCode?: string | null;
+  // spec 0.2.1
+  observedFee?: { amount: bigint; assetId: string } | null;
+  depositedAmount?: bigint | null;
+  deadline?: Date;
+  abandoned?: { at: Date; reason: string; note: string | null };
   // scheduling (not material: no version, no event)
   nextPollAt?: Date | null;
   pollCount?: number;
@@ -97,6 +102,17 @@ export async function applyChange(
     cur.evidence === null ? null : JSON.stringify(cur.evidence),
   );
   set("failure_code", c.failureCode, cur.failure_code);
+  if (c.observedFee !== undefined) {
+    set("observed_fee_amount", num(c.observedFee?.amount ?? null), cur.observed_fee_amount);
+    set("observed_fee_asset", c.observedFee?.assetId ?? null, cur.observed_fee_asset);
+  }
+  set("deposited_amount", num(c.depositedAmount), cur.deposited_amount);
+  set("deadline", c.deadline?.toISOString(), cur.deadline.toISOString());
+  if (c.abandoned && cur.abandoned_at === null) {
+    patch.abandoned_at = c.abandoned.at.toISOString();
+    patch.abandon_reason = c.abandoned.reason.slice(0, 100);
+    patch.abandon_note = c.abandoned.note?.slice(0, 500) ?? null;
+  }
   if (patch.evidence === JSON.stringify(cur.evidence)) delete patch.evidence;
   const material = Object.keys(patch).length > 0;
 

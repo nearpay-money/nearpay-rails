@@ -21,6 +21,8 @@ export interface Screening {
     amountUsdMicros: bigint | null;
     /** Why (`payment` default; `refund` for refund-leg recipients). */
     context?: "payment" | "refund";
+    /** Bypass the screening cache (spec 0.2.1 `fresh`; owner-overridden refund recipients). */
+    fresh?: boolean;
   }): Promise<ScreeningOutcome>;
 }
 
@@ -52,6 +54,7 @@ export function complianceScreening(o: {
             context: i.context ?? "payment",
             account_id: i.accountId,
             livemode: i.livemode,
+            ...(i.fresh ? { fresh: true } : {}),
             ...(micros !== null && micros <= BigInt(Number.MAX_SAFE_INTEGER)
               ? { amount_usd_micros: Number(micros) }
               : {}),

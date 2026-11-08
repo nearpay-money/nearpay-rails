@@ -79,6 +79,10 @@ describe("refund legs on the sandbox", () => {
     const x = Execution.parse(r.body);
     expect(x.settlement.expected).toBe("3000000");
     expect(x.refund?.transfer).toMatchObject({ signer_id: "merchant.near", receiver_id: x.deposit?.address });
+    // spec 0.2.1: rails issues the nonce; test mode signs with the sandbox Verifier's salt (never valid on mainnet)
+    const nonce = Buffer.from(x.refund?.transfer?.nonce as string, "base64");
+    expect(nonce).toHaveLength(32);
+    expect(nonce.subarray(0, 4).toString("hex")).toBe("5a0dbe11");
   });
 });
 

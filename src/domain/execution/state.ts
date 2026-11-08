@@ -29,7 +29,8 @@ export const isTerminal = (s: State): boolean => TERMINAL.has(s);
 
 /** Allowed transitions (the property tests check every applied change against this graph). */
 export const TRANSITIONS: Readonly<Record<State, readonly State[]>> = {
-  quoting: ["awaiting_deposit", "failed"],
+  // `expired_unpaid` from `quoting`/`awaiting_deposit` also when payments abandons a refund leg (spec 0.2.1)
+  quoting: ["awaiting_deposit", "failed", "expired_unpaid"],
   awaiting_deposit: [
     "deposit_detected",
     "incomplete_deposit",

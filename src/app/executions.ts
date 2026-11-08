@@ -18,6 +18,7 @@ import {
   baseAfterBearer,
   binding as bindingOf,
   executionDeadline,
+  feeShareOfAmountIn,
   intentsFee,
   tagCandidates,
   tagSpace,
@@ -35,6 +36,7 @@ import {
 } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
 import type { Rails } from "./context.js";
+import { readKillSwitch } from "./kill-switch.js";
 import { applyChange, emitExecution, lockExecution } from "./ledger.js";
 import { observationValues } from "./observations.js";
 import { policyFor } from "./pricing.js";
@@ -309,7 +311,10 @@ export async function createExecution(r: Rails, b: CreateBody): Promise<Executio
   }
 
   if (b.livemode) {
-    if (!(await flag(r, "quoting_enabled"))) throw railUnavailable("kill switch engaged");
+    // spec 0.2.1: an unknown kill-switch state (never read, no event) refuses live quoting too (fail closed)
+    const ks = await readKillSwitch(r);
+    if (ks !== "released")
+      throw railUnavailable(ks === "engaged" ? "kill switch engaged" : "kill switch state unknown");
     if (!r.treasury) throw railUnavailable("live mode is not configured");
   }
   if (b.method === "route_quote") {
@@ -461,6 +466,10 @@ async function insertRouteQuote(
         deposit_memo: deposit.depositMemo ?? null,
         amount_in: deposit.amountIn,
         min_amount_in: deposit.minAmountIn,
+        // spec 0.2.1: NearPay's fee share of amount_in (display only)
+        fee_amount_in: feeShareOfAmountIn(deposit.amountIn, x.bps, b.fee.bearer)?.toString() ?? null,
+        origin_decimals: x.o.decimals,
+        destination_decimals: x.d.decimals,
         binding: null,
         deadline: x.deadline,
         time_when_inactive: deposit.timeWhenInactive ? new Date(deposit.timeWhenInactive) : null,
@@ -550,6 +559,8 @@ async function createIntentsTransfer(r: Rails, b: CreateBody, x: Prepared): Prom
           idempotency_key: b.idempotency_key,
           state: "awaiting_deposit",
           provider_status: null,
+          origin_decimals: x.o.decimals,
+          destination_decimals: x.d.decimals,
           origin_asset_id: x.o.asset_id,
           origin_chain: NEAR,
           refund_to: b.origin.refund_to,

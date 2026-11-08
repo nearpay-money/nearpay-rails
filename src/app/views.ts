@@ -24,6 +24,8 @@ export function executionView(r: ExecutionRow): Execution {
           min_amount_in: intOrNull(r.min_amount_in) ?? "0",
           chain: r.refund_type === "intents" ? "near:mainnet" : r.origin_chain,
           deadline: iso(r.deadline),
+          // spec 0.2.1: NearPay's fee share of amount_in (display only); null when not apportioned
+          fee_amount_in: intOrNull(r.fee_amount_in),
         }
       : null;
   const intents =
@@ -56,6 +58,7 @@ export function executionView(r: ExecutionRow): Execution {
       chain: r.origin_chain,
       refund_to: r.refund_to,
       refund_type: r.refund_type,
+      ...(r.origin_decimals !== null ? { decimals: r.origin_decimals } : {}),
     },
     settlement: {
       asset_id: r.destination_asset_id,
@@ -65,6 +68,7 @@ export function executionView(r: ExecutionRow): Execution {
       recipient: r.recipient,
       recipient_type: r.recipient_type,
       chain: r.destination_chain,
+      ...(r.destination_decimals !== null ? { decimals: r.destination_decimals } : {}),
     },
     price_snapshot: r.price_snapshot,
     deposit,
@@ -82,6 +86,14 @@ export function executionView(r: ExecutionRow): Execution {
     updated_at: iso(r.updated_at),
     reference: r.reference ?? null,
     refund: r.kind === "refund" ? (r.refund ?? null) : null,
+    // spec 0.2.1
+    observed_fee:
+      r.kind === "payment" && r.observed_fee_amount !== null && r.observed_fee_asset !== null
+        ? { amount: int(r.observed_fee_amount), asset_id: r.observed_fee_asset }
+        : null,
+    deposited_amount: intOrNull(r.deposited_amount),
+    abandoned_at: isoOrNull(r.abandoned_at),
+    abandon_reason: r.abandon_reason,
   } as Execution;
 }
 

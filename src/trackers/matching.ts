@@ -60,7 +60,7 @@ export async function matchCredits(r: Rails, credits: readonly Credit[], o: Matc
   if (bindings.length) {
     const rows = await r.db
       .selectFrom("executions")
-      .select(["id", "binding", "recipient", "destination_asset_id", "amount_out_expected"])
+      .select(["id", "kind", "binding", "recipient", "fee_recipient", "destination_asset_id", "amount_out_expected"])
       .where("binding", "in", bindings)
       .where("livemode", "=", o.livemode)
       .where("terminal_at", "is", null)
@@ -75,7 +75,27 @@ export async function matchCredits(r: Rails, credits: readonly Credit[], o: Matc
       const expected = BigInt(x.amount_out_expected);
       const result = c.amount >= expected ? "pass" : "short";
       if (o.confirm && !(await o.confirm(c, x.id, expected))) continue;
-      const done = await settleWithEvidence(r, x.id, evidence(c, result, { binding: x.binding }));
+      // spec 0.2.1: the executed payload's fee transfer (same binding, same tx, to the fee recipient) is the observed
+      // fee of a payment; what the payer moved is the merchant transfer plus that fee
+      const feeTo = x.fee_recipient?.toLowerCase() ?? null;
+      const fee =
+        x.kind === "payment" && feeTo
+          ? credits
+              .filter(
+                (k) =>
+                  k.kind === "binding" &&
+                  k.memo === x.binding &&
+                  k.txHash === c.txHash &&
+                  k.to === feeTo &&
+                  k.assetId === x.destination_asset_id,
+              )
+              .reduce((a, k) => a + k.amount, 0n)
+          : 0n;
+      const done = await settleWithEvidence(r, x.id, {
+        ...evidence(c, result, { binding: x.binding }),
+        ...(x.kind === "payment" ? { observedFee: { amount: fee, assetId: x.destination_asset_id } } : {}),
+        depositedAmount: c.amount + fee,
+      });
       if (done?.state === "succeeded") settled++;
     }
   }

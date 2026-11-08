@@ -119,3 +119,36 @@ describe("evidence", () => {
     expect(canTransition("held", "settling")).toBe(false);
   });
 });
+
+describe("abandonExecution decision (spec 0.2.1)", () => {
+  it("abandons pre-deposit refund legs; replays abandoned ones; refuses payments, deposits and later states", async () => {
+    const { decideAbandon } = await import("../../src/domain/execution/abandon.js");
+    const base = {
+      kind: "refund" as const,
+      state: "awaiting_deposit" as const,
+      abandoned: false,
+      depositTxHashes: 0,
+      depositedAmount: null,
+      providerStatus: "PENDING_DEPOSIT",
+    };
+    expect(decideAbandon(base)).toEqual({ kind: "abandon", to: "expired_unpaid" });
+    expect(decideAbandon({ ...base, state: "quoting", providerStatus: null })).toMatchObject({ kind: "abandon" });
+    expect(decideAbandon({ ...base, state: "expired_unpaid" })).toMatchObject({ kind: "abandon" });
+    expect(decideAbandon({ ...base, abandoned: true, state: "deposit_detected" })).toEqual({ kind: "replay" });
+    expect(decideAbandon({ ...base, kind: "payment" })).toMatchObject({ kind: "conflict" });
+    expect(decideAbandon({ ...base, depositTxHashes: 1 })).toMatchObject({ kind: "conflict" });
+    expect(decideAbandon({ ...base, depositedAmount: 5n })).toMatchObject({ kind: "conflict" });
+    expect(decideAbandon({ ...base, depositedAmount: 0n })).toMatchObject({ kind: "abandon" });
+    expect(decideAbandon({ ...base, providerStatus: "KNOWN_DEPOSIT_TX" })).toMatchObject({ kind: "conflict" });
+    for (const state of [
+      "deposit_detected",
+      "settling",
+      "verifying",
+      "held",
+      "succeeded",
+      "refunded",
+      "failed",
+    ] as const)
+      expect(decideAbandon({ ...base, state })).toMatchObject({ kind: "conflict" });
+  });
+});
