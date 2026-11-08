@@ -10,6 +10,7 @@
  * Only successful receipt outcomes count.
  */
 import { parseEventLogs } from "@nearpay-internal/intents";
+import type { EvidenceChainDetail } from "../../spec-0.4.0.js";
 
 export interface Credit {
   readonly chain: string;
@@ -25,6 +26,8 @@ export interface Credit {
   readonly blockRef: string;
   /** Unique within the transaction (receipt id + event index). */
   readonly logRef: string;
+  /** spec 0.4.0: chain detail for the evidence (Solana watcher). */
+  readonly detail?: EvidenceChainDetail;
 }
 
 export interface ReceiptOutcome {

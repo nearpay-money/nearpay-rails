@@ -1,0 +1,118 @@
+{
+  "description": "Checkout wallet-path instructions for Solana (spec 0.4.0, lld/checkout-and-js.md §5.4). Built only from the verified sentinel attestation: deposit.address, deposit.amount_in, asset.decimals and asset.token (SOL: `native`, asset `nep141:sol.omft.near`; SPL: `spl` whose mint reproduces the omft asset id, owned by the classic Token program). No memo and no Solana Pay `reference` (wallet path only when deposit.memo is null). Fee payer = the connected wallet; recent blockhash from the checkout's Solana RPC. The instructions (program, account metas, data) are normative; how a library orders the message's account keys is not, so no serialized message is pinned. ATA = findProgramAddress([owner, TOKEN_PROGRAM, mint], ATA_PROGRAM).",
+  "programs": {
+    "system": "11111111111111111111111111111111",
+    "token": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "associated_token": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+  },
+  "inputs": {
+    "payer": "EyjEeiTxb4rvkoN3ZA2zTimuc6VyF8V1QuH9TT66Gkn6",
+    "deposit_address": "F4d933S5Xkj1LZ7jQZHv2oVxc1YTiWswgBxeQYLcQ71x",
+    "recent_blockhash": "AX2DPY1mMojpmUNuoYycmtqmkRQ9hX8sgYKKiWUvCHZv"
+  },
+  "spl": {
+    "asset_id": "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+    "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimals": 6,
+    "amount_in": "25012345",
+    "payer_ata": {
+      "address": "DN5C7q7RzxDXor5jNHDBxfHU5yp3M58XJXcWR4WvvyAp",
+      "bump": 248
+    },
+    "deposit_ata": {
+      "address": "6kXo5suJm2RPRyJEnof9oz3FcEtXUYFoKAUhDK6CkpGQ",
+      "bump": 255
+    },
+    "instructions": [
+      {
+        "name": "AssociatedTokenAccount.CreateIdempotent",
+        "program_id": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        "accounts": [
+          {
+            "pubkey": "EyjEeiTxb4rvkoN3ZA2zTimuc6VyF8V1QuH9TT66Gkn6",
+            "is_signer": true,
+            "is_writable": true
+          },
+          {
+            "pubkey": "6kXo5suJm2RPRyJEnof9oz3FcEtXUYFoKAUhDK6CkpGQ",
+            "is_signer": false,
+            "is_writable": true
+          },
+          {
+            "pubkey": "F4d933S5Xkj1LZ7jQZHv2oVxc1YTiWswgBxeQYLcQ71x",
+            "is_signer": false,
+            "is_writable": false
+          },
+          {
+            "pubkey": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "is_signer": false,
+            "is_writable": false
+          },
+          {
+            "pubkey": "11111111111111111111111111111111",
+            "is_signer": false,
+            "is_writable": false
+          },
+          {
+            "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "is_signer": false,
+            "is_writable": false
+          }
+        ],
+        "data_hex": "01"
+      },
+      {
+        "name": "Token.TransferChecked",
+        "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "accounts": [
+          {
+            "pubkey": "DN5C7q7RzxDXor5jNHDBxfHU5yp3M58XJXcWR4WvvyAp",
+            "is_signer": false,
+            "is_writable": true
+          },
+          {
+            "pubkey": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "is_signer": false,
+            "is_writable": false
+          },
+          {
+            "pubkey": "6kXo5suJm2RPRyJEnof9oz3FcEtXUYFoKAUhDK6CkpGQ",
+            "is_signer": false,
+            "is_writable": true
+          },
+          {
+            "pubkey": "EyjEeiTxb4rvkoN3ZA2zTimuc6VyF8V1QuH9TT66Gkn6",
+            "is_signer": true,
+            "is_writable": false
+          }
+        ],
+        "data_hex": "0c79a87d010000000006"
+      }
+    ]
+  },
+  "sol": {
+    "asset_id": "nep141:sol.omft.near",
+    "decimals": 9,
+    "amount_in": "1500000000",
+    "instructions": [
+      {
+        "name": "System.Transfer",
+        "program_id": "11111111111111111111111111111111",
+        "accounts": [
+          {
+            "pubkey": "EyjEeiTxb4rvkoN3ZA2zTimuc6VyF8V1QuH9TT66Gkn6",
+            "is_signer": true,
+            "is_writable": true
+          },
+          {
+            "pubkey": "F4d933S5Xkj1LZ7jQZHv2oVxc1YTiWswgBxeQYLcQ71x",
+            "is_signer": false,
+            "is_writable": true
+          }
+        ],
+        "data_hex": "02000000002f685900000000"
+      }
+    ]
+  },
+  "after_broadcast": "The wallet's `solana:signAndSendTransaction` returns the signature; checkout posts it to `…/deposit_tx {tx_hash: <base58 signature>}`. Test mode never broadcasts (Simulate payment)."
+}

@@ -12,7 +12,15 @@ export async function refreshTokens(r: Rails, livemode: boolean): Promise<number
   const provider = livemode ? r.providers.live : r.providers.test;
   if (!provider) return 0;
   const list = await provider.tokens();
-  const rows = registryRows(livemode, list, r.profiles, { pegs: r.stablePegs, coingeckoIds: r.coingeckoIds });
+  const rows = registryRows(livemode, list, r.profiles, {
+    pegs: r.stablePegs,
+    coingeckoIds: r.coingeckoIds,
+    onDrop: (asset_id, reason) =>
+      r.log.error(
+        { asset_id, reason, livemode },
+        "ALERT token registry entry dropped (asset id not bound to its contract)",
+      ),
+  });
   if (rows.length === 0) throw new Error(`${provider.name} returned no usable tokens`);
   const now = new Date(r.now());
   await r.db.transaction().execute(async (tx) => {

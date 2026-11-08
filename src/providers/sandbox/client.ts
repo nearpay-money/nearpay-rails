@@ -4,6 +4,7 @@
  * using the 1Click construction, so the same SDK call verifies them with `NP_SANDBOX_SIGNING_PUBKEY`.
  * Also the simulated chains and Verifier feed the sandbox verifier and sandbox feed read.
  */
+
 import { verifyQuoteSignature } from "@defuse-protocol/one-click-sdk-typescript";
 import { httpClient } from "@nearpay-internal/http";
 import {
@@ -13,6 +14,7 @@ import {
   sandboxIntentsEvents,
 } from "@nearpay-internal/spec";
 import bs58 from "bs58";
+import type { SimEventReceiptFields } from "../../spec-0.4.0.js";
 import { oneClickCalls, textFetch } from "../oneclick/client.js";
 import { assertMode, type RouteProvider, type Scenario } from "../port.js";
 
@@ -38,13 +40,24 @@ export interface SandboxChains {
     hash: string,
   ): Promise<{
     finalized: boolean;
-    transfers: { token: string; from?: string | null | undefined; to: string; amount: string }[];
+    transfers: {
+      token: string;
+      from?: string | null | undefined;
+      to: string;
+      amount: string;
+      // spec 0.4.0 (passed through by the 0.3.1 loose schema; read via `SimTxAdditions`)
+      vout?: number | null | undefined;
+      token_account?: string | null | undefined;
+    }[];
+    block_ref?: string | null | undefined;
+    confirmations?: number | null | undefined;
+    failed?: boolean | undefined;
   } | null>;
   events(
     cursor: number,
     limit: number,
   ): Promise<{
-    events: { seq: number; tx_hash: string; block_height: number; log: string }[];
+    events: ({ seq: number; tx_hash: string; block_height: number; log: string } & SimEventReceiptFields)[];
     next_cursor: number;
   }>;
 }

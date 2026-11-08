@@ -28,6 +28,12 @@ export interface RailsMetrics {
   lag(name: string, blocks: number): void;
   explorer(res: { rows: number; recorded: number; nudged: number; unmatched: number }): void;
   archived(rows: number): void;
+  /** Stage 4 (§21.4): `tier_a_degraded{chain}` (1 = the chain's pool is unhealthy or unset). */
+  tierDegraded(chain: string, degraded: boolean): void;
+  /** Stage 4: `chain_rpc_calls_total{chain,outcome}` per endpoint call of the Solana/Bitcoin pools. */
+  chainRpcCall(chain: string, outcome: string): void;
+  /** Stage 4 (§8.6): `vault_events_total{outcome}` — `forwarded`, `duplicate` or a reject reason. */
+  vaultEvent(outcome: string): void;
 }
 
 export const noMetrics: RailsMetrics = {
@@ -43,6 +49,9 @@ export const noMetrics: RailsMetrics = {
   lag() {},
   explorer() {},
   archived() {},
+  tierDegraded() {},
+  chainRpcCall() {},
+  vaultEvent() {},
 };
 
 export function railsMetrics(m: ServiceMetrics): RailsMetrics {
@@ -75,6 +84,21 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
   ]);
   const explorerRows = m.counter("explorer_rows_total", "Explorer feed rows by outcome.", ["outcome"]);
   const archived = m.counter("observations_archived_total", "Observation payloads moved to the archive store.");
+  const degraded = m.gauge("tier_a_degraded", "1 when a Tier-A chain's RPC pool is unset or unhealthy (§21.4).", [
+    "chain",
+  ]);
+  const rpcCalls = m.counter("chain_rpc_calls_total", "Solana/Bitcoin pool endpoint calls by outcome.", [
+    "chain",
+    "outcome",
+  ]);
+  const vaultRejected = m.counter(
+    "vault_event_rejected_total",
+    "nearpay_vault logs dropped instead of forwarded (rails §8.6).",
+    ["reason"],
+  );
+  const vaultForwarded = m.counter("vault_events_forwarded_total", "Vault events forwarded to evt.rails.vault.event.", [
+    "outcome",
+  ]);
   const lag = m.gauge("tracker_lag_blocks", "Blocks between the chain's final head and a tracker cursor.", ["tracker"]);
   return {
     quote: (provider, outcome, s) => quote.observe({ provider, outcome }, s),
@@ -93,6 +117,12 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
       explorerRows.inc({ outcome: "unchanged" }, Math.max(0, x.rows - x.recorded - x.unmatched));
     },
     archived: (n) => archived.inc({}, n),
+    tierDegraded: (chain, d) => degraded.set({ chain }, d ? 1 : 0),
+    chainRpcCall: (chain, outcome) => rpcCalls.inc({ chain, outcome }),
+    vaultEvent: (outcome) =>
+      outcome === "forwarded" || outcome === "duplicate"
+        ? vaultForwarded.inc({ outcome })
+        : vaultRejected.inc({ reason: outcome }),
   };
 }
 
@@ -144,6 +174,8 @@ export interface Rails {
   };
   /** Observation archive (§8.11); `store` null → the job does nothing. */
   readonly archive: { readonly store: string | null; readonly afterDays: number };
+  /** Stage 4 (§8.6): vault accounts whose `nearpay_vault` events are forwarded (live: null = not forwarded). */
+  readonly vault: { readonly live: string | null; readonly test: string };
   readonly random: () => number;
   readonly now: () => number;
 }

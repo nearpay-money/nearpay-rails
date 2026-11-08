@@ -44,11 +44,13 @@ import { DEFAULT_POLICY } from "../domain/pricing/pricing.js";
 import { type ChainProfiles, chainProfiles } from "../domain/token-registry/chain-profiles.js";
 import { type Budgets, budgets as createBudgets } from "../infra/budget.js";
 import { complianceScreening, type Screening } from "../infra/clients/compliance.js";
+import { type Esplora, esploraClient } from "../infra/clients/esplora.js";
 import { type EvmRpc, evmRpc } from "../infra/clients/evm.js";
 import { type Explorer, explorer as explorerClient, sandboxExplorer } from "../infra/clients/explorer.js";
 import { type Neardata, type NearRpc, neardata as neardataClient, nearRpc } from "../infra/clients/near.js";
 import { type Nonces, verifierNonces } from "../infra/clients/nonces.js";
 import { type SentinelClient, sentinelClient } from "../infra/clients/sentinel.js";
+import { type SolanaRpc, solanaRpc } from "../infra/clients/solana.js";
 import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
 import type { DB } from "../infra/db/schema.js";
 import { ecbProvider, type FxFetch } from "../providers/fx/ecb.js";
@@ -56,8 +58,11 @@ import { oneClickProvider } from "../providers/oneclick/client.js";
 import { coingeckoProvider } from "../providers/prices/coingecko.js";
 import { type PriceProvider, PriceRateLimited } from "../providers/prices/port.js";
 import { sandboxProvider } from "../providers/sandbox/client.js";
+import { BITCOIN_MAINNET, SOLANA_MAINNET } from "../spec-0.4.0.js";
 import { loop } from "../trackers/cursors.js";
+import { bitcoinWatchOnce } from "../trackers/destination-watchers/bitcoin-watcher.js";
 import { watchOnce } from "../trackers/destination-watchers/evm-watcher.js";
+import { solanaWatchOnce } from "../trackers/destination-watchers/solana-watcher.js";
 import { explorerOnce } from "../trackers/explorer-feed/feed.js";
 import { pollerTask } from "../trackers/hot-poller/poller.js";
 import { indexOnce, sandboxFeedOnce } from "../trackers/near-indexer/indexer.js";
@@ -106,6 +111,38 @@ interface Built {
   database: Database<DB>;
   budgets: Budgets;
   serviceToken: () => Promise<string>;
+  /** Stage 4 (§21.4): Tier-A chains running as Tier B because their RPC pool is not configured. */
+  degraded: string[];
+}
+
+/** Stage 4 (§21.4): which pooled chains have an RPC pool configured. */
+export function chainPoolConfigured(config: SharedConfig) {
+  return (chain: string): boolean => {
+    if (chain === SOLANA_MAINNET) return config.solanaRpcUrls.length > 0;
+    if (chain === BITCOIN_MAINNET) return config.bitcoinEsploraUrls.length > 0;
+    return false;
+  };
+}
+
+/** Stage 4 pools (§21.4); null when unconfigured. Metrics resolve lazily (the service attaches them later). */
+export function chainPools(config: SharedConfig, r: Rails, f?: typeof fetch) {
+  const solana: SolanaRpc | null = config.solanaRpcUrls.length
+    ? solanaRpc({
+        urls: config.solanaRpcUrls,
+        now: r.now,
+        onCall: (o) => r.metrics.chainRpcCall(SOLANA_MAINNET, o),
+        ...(f ? { fetch: f } : {}),
+      })
+    : null;
+  const esplora: Esplora | null = config.bitcoinEsploraUrls.length
+    ? esploraClient({
+        urls: config.bitcoinEsploraUrls,
+        now: r.now,
+        onCall: (o) => r.metrics.chainRpcCall(BITCOIN_MAINNET, o),
+        ...(f ? { fetch: f } : {}),
+      })
+    : null;
+  return { solana, esplora };
 }
 
 /**
@@ -135,6 +172,8 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: n
       return () => c.getToken();
     })();
   const budgets = deps.budgets ?? createBudgets({ valkeyUrl: config.valkeyUrl });
+  // §21.4: Solana/Bitcoin are Tier A only with their RPC pool configured (computed once at boot)
+  const effective = loadProfiles(config.chainsFile).withPools(chainPoolConfigured(config));
   const providers: Providers = deps.providers ?? {
     live: oneClickProvider({
       baseUrl: config.oneclickBaseUrl,
@@ -158,7 +197,7 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: n
     db: database.db,
     log: undefined as unknown as Rails["log"],
     metrics: noMetrics,
-    profiles: loadProfiles(config.chainsFile),
+    profiles: effective.profiles,
     providers,
     screening:
       deps.screening ??
@@ -209,15 +248,20 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: n
     awaitingSweepS: config.awaitingSweepS,
     screeningFailClosedUsdMicros: usdMicros(config.screeningFailClosedUsd),
     agreementUsdMicros: usdMicros(config.agreementUsd),
+    vault: { live: config.vaultContract ?? null, test: config.testVaultContract },
     random: deps.random ?? Math.random,
     now: deps.now ?? Date.now,
   };
-  return { rails, database, budgets, serviceToken };
+  return { rails, database, budgets, serviceToken, degraded: effective.degraded };
 }
 
 function attach(b: Built, service: Service, deps: ServiceDeps) {
   b.rails.log = service.log;
   b.rails.metrics = railsMetrics(service.metrics);
+  for (const chain of b.degraded) {
+    b.rails.metrics.tierDegraded(chain, true);
+    service.log.error({ chain }, "ALERT tier_a_degraded: no RPC pool configured; the chain settles as Tier B");
+  }
   service.onShutdown(async () => {
     await b.budgets.close();
     if (!deps.database) await b.database.close();
@@ -259,6 +303,9 @@ export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service:
 export interface TrackerDeps extends ServiceDeps {
   near?: NearRpc | null;
   evm?: ReadonlyMap<string, EvmRpc>;
+  /** Stage 4 pools (tests inject fakes); default from `NP_SOLANA_RPC_URLS` / `NP_BITCOIN_ESPLORA_URLS`. */
+  solana?: SolanaRpc | null;
+  esplora?: Esplora | null;
   tickMs?: number;
 }
 
@@ -273,6 +320,18 @@ export function evmPools(config: SharedConfig, profiles: ChainProfiles, f?: type
   return out;
 }
 
+function trackerPools(
+  config: SharedConfig,
+  r: Rails,
+  deps: { solana?: SolanaRpc | null; esplora?: Esplora | null; fetch?: typeof fetch },
+) {
+  const pools = chainPools(config, r, deps.fetch);
+  return {
+    solana: deps.solana !== undefined ? deps.solana : pools.solana,
+    esplora: deps.esplora !== undefined ? deps.esplora : pools.esplora,
+  };
+}
+
 export function createTracker(config: TrackerConfig, deps: TrackerDeps = {}): { service: Service; rails: Rails } {
   const b = build(config, deps, "tracker");
   const service = createService({ name: "rails", config, readiness: readiness(b.database) });
@@ -283,6 +342,7 @@ export function createTracker(config: TrackerConfig, deps: TrackerDeps = {}): { 
         ? nearRpc({ urls: config.nearRpcUrls, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
         : deps.near,
     evm: deps.evm ?? evmPools(config, b.rails.profiles, deps.fetch),
+    ...trackerPools(config, b.rails, deps),
   };
   service.addBackground(pollerTask(b.rails, deps.tickMs ? { tickMs: deps.tickMs } : {}));
   service.addBackground(verifierTask(b.rails, verifierDeps, deps.tickMs ? { tickMs: deps.tickMs } : {}));
@@ -301,6 +361,9 @@ export interface FeedsDeps extends ServiceDeps {
   bus?: Bus;
   neardata?: Neardata | null;
   evm?: ReadonlyMap<string, EvmRpc>;
+  /** Stage 4 watcher pools (tests inject fakes). */
+  solana?: SolanaRpc | null;
+  esplora?: Esplora | null;
   explorer?: Explorer | null;
   /** Test-mode Explorer (sandbox mirror); default: the mirror when the sandbox is configured. */
   testExplorer?: Explorer | null;
@@ -312,7 +375,9 @@ export interface FeedsDeps extends ServiceDeps {
   archive?: ArchiveStore | null;
   tickMs?: number;
   /** Loop cadences (tests shorten them). */
-  intervals?: Partial<Record<"tokens" | "sandbox" | "indexer" | "watcher" | "prices" | "fx", number>>;
+  intervals?: Partial<
+    Record<"tokens" | "sandbox" | "indexer" | "watcher" | "prices" | "fx" | "solana" | "bitcoin", number>
+  >;
 }
 
 export async function createFeeds(
@@ -393,6 +458,8 @@ export async function createFeeds(
     watcher: 0,
     prices: 60_000,
     fx: 30 * 60_000,
+    solana: undefined as number | undefined,
+    bitcoin: undefined as number | undefined,
     ...deps.intervals,
   };
   const leader = (name: string, run: (signal: AbortSignal) => Promise<void>): BackgroundTask => {
@@ -490,6 +557,40 @@ export async function createFeeds(
     service.addBackground(
       leader(`evm:${chain}`, (signal) =>
         loop(r, `evm:${chain}`, signal, async () => ((await watchOnce(r, chain, rpc)) >= 500 ? 0 : every)),
+      ),
+    );
+  }
+  // Stage 4 (§21.2): Solana (4 s) and Bitcoin (60 s) watchers, live only, when the chain is Tier A with a pool
+  const pools = trackerPools(config, r, deps);
+  const sol = r.profiles.get(SOLANA_MAINNET);
+  if (pools.solana && sol?.watcher && sol.tier === "A") {
+    const rpc = pools.solana;
+    const every = iv.solana ?? sol.watchIntervalS * 1000;
+    service.addBackground(
+      leader("solana-watcher", (signal) =>
+        loop(r, "solana-watcher", signal, async () => {
+          await solanaWatchOnce(r, rpc);
+          return every;
+        }),
+      ),
+    );
+  }
+  const btc = r.profiles.get(BITCOIN_MAINNET);
+  if (pools.esplora && btc?.watcher && btc.tier === "A") {
+    const esplora = pools.esplora;
+    const every = iv.bitcoin ?? btc.watchIntervalS * 1000;
+    service.addBackground(
+      leader("bitcoin-watcher", (signal) =>
+        loop(
+          r,
+          "bitcoin-watcher",
+          signal,
+          async () => {
+            await bitcoinWatchOnce(r, esplora);
+            return every;
+          },
+          every,
+        ),
       ),
     );
   }

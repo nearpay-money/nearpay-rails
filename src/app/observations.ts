@@ -12,6 +12,7 @@ import { isExpired, LATE_REFUND_WINDOW_MS, nextPollAt } from "../domain/executio
 import { decideEvidence, decideProviderStatus, type HeldReason, type State } from "../domain/execution/state.js";
 import type { VerificationResult } from "../domain/verification/verification.js";
 import type { EvidenceRow, ObservationSource } from "../infra/db/schema.js";
+import type { EvidenceChainDetail } from "../spec-0.4.0.js";
 import type { Rails, Tx } from "./context.js";
 import { applyChange, type Change, type ChangeMeta, lockExecution } from "./ledger.js";
 import type { ExecutionRow } from "./views.js";
@@ -176,6 +177,8 @@ export interface EvidenceInput {
   /** spec 0.2.1 — `intents_transfer`: the executed payload's fee transfer and the payer's total (incl. fee). */
   readonly observedFee?: { readonly amount: bigint; readonly assetId: string } | null;
   readonly depositedAmount?: bigint | null;
+  /** spec 0.4.0 (§21.3): chain detail of a Solana / Bitcoin settlement (both set — one null — on those chains). */
+  readonly chainDetail?: EvidenceChainDetail;
 }
 
 function explorerUrl(chain: string, tx: string): string | null {
@@ -225,6 +228,7 @@ export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: Evid
     observed_at: new Date(r.now()).toISOString(),
     explorer_url: explorerUrl(e.chain, e.txHash),
     sender: e.sender ?? null,
+    ...(e.chainDetail ? { solana: e.chainDetail.solana ?? null, bitcoin: e.chainDetail.bitcoin ?? null } : {}),
   };
   if (decision.to === "held") {
     r.log.error({ execution: cur.id, alert: decision.alert }, "ALERT execution held");

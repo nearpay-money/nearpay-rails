@@ -7,6 +7,8 @@
  * marks the USD stablecoins that may settle at par (§8.2).
  */
 import { AssetId } from "@nearpay/spec";
+import { parseOmftAssetId } from "../../spec-0.4.0.js";
+import { splAssetId } from "../chains/solana.js";
 import { parseExactDecimal, ratioToWire } from "../pricing/ratio.js";
 import type { ChainProfiles } from "./chain-profiles.js";
 
@@ -69,13 +71,23 @@ export function registryRows(
   livemode: boolean,
   tokens: readonly ProviderToken[],
   profiles: ChainProfiles,
-  o: { pegs?: Readonly<Record<string, string>>; coingeckoIds?: Readonly<Record<string, string>> } = {},
+  o: {
+    pegs?: Readonly<Record<string, string>>;
+    coingeckoIds?: Readonly<Record<string, string>>;
+    /** Stage 4 (§21.1): an entry dropped because its contract does not reproduce its asset id (alert). */
+    onDrop?: (assetId: string, reason: string) => void;
+  } = {},
 ): TokenRow[] {
   const seen = new Set<string>();
   const rows: TokenRow[] = [];
   for (const t of tokens) {
     if (!AssetId.safeParse(t.assetId).success || seen.has(t.assetId)) continue;
     if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 255) continue;
+    const bound = contractBinding(t);
+    if (bound !== null) {
+      o.onDrop?.(t.assetId, bound);
+      continue;
+    }
     seen.add(t.assetId);
     const profile = profiles.byBlockchain(t.blockchain);
     const family = familyOf(t.symbol);
@@ -108,6 +120,21 @@ export function registryRows(
     });
   }
   return rows;
+}
+
+/**
+ * Stage 4 (§21.1): an SPL omft entry (`nep141:sol-<hash20>.omft.near`) is bound to its mint like an EVM contract —
+ * `splAssetId(contractAddress)` must reproduce the id, else the entry is dropped (null = consistent / not an SPL id).
+ */
+export function contractBinding(t: Pick<ProviderToken, "assetId" | "blockchain" | "contractAddress">): string | null {
+  const omft = parseOmftAssetId(t.assetId);
+  if (omft?.blockchain !== "sol" || omft.kind !== "hash20") return null;
+  if (!t.contractAddress) return "SPL asset without a mint";
+  try {
+    return splAssetId(t.contractAddress) === t.assetId ? null : "SPL mint does not reproduce the asset id";
+  } catch {
+    return "SPL mint is not a Solana address";
+  }
 }
 
 export type RouteClass = "same_asset" | "stable_pair" | "volatile" | "intents_transfer";

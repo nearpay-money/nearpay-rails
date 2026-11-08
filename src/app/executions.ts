@@ -7,6 +7,7 @@
  * `intents_transfer`: no provider; the payer signs two Verifier transfers carrying a binding memo
  * that the indexer attributes (§8.6).
  */
+
 import { createHash } from "node:crypto";
 import { NearAccountId, type RouteBody } from "@nearpay/spec";
 import { destinationKey, getChain, validateAddress } from "@nearpay-internal/chains";
@@ -37,6 +38,7 @@ import {
 } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
 import { refusalError } from "./access.js";
+import { tierAtCreate } from "./chain-tier.js";
 import type { Rails } from "./context.js";
 import { readKillSwitch } from "./kill-switch.js";
 import { applyChange, emitExecution, lockExecution } from "./ledger.js";
@@ -449,10 +451,13 @@ async function insertRouteQuote(
 ): Promise<Execution> {
   const now = new Date(r.now());
   const deposit = q.res.quote;
+  // §21.4: the tier this execution is verified with, fixed now (a pool failing later never downgrades it)
+  const verificationTier = await tierAtCreate(r, b.destination.chain);
   try {
     return await r.db.transaction().execute(async (tx) => {
       const values = {
         id: x.id,
+        verification_tier: verificationTier,
         account_id: x.accountId,
         livemode: b.livemode,
         kind: b.kind,

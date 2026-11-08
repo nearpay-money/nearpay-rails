@@ -104,16 +104,29 @@ describe("evidence comparison (§8.8)", () => {
 });
 
 describe("chain profiles", () => {
-  it("loads the shipped profiles: Tier A NEAR, Ethereum, Base, Arbitrum with watchers on EVM", () => {
+  it("loads the shipped profiles: Tier A NEAR, Ethereum, Base, Arbitrum, Solana, Bitcoin (Stage 4) with watchers", () => {
     const a = profiles.all().filter((p) => p.tier === "A");
-    expect(a.map((p) => p.chain).sort()).toEqual(["eip155:1", "eip155:42161", "eip155:8453", "near:mainnet"]);
+    expect(a.map((p) => p.chain).sort()).toEqual([
+      "bip122:000000000019d6689c085ae165831e93",
+      "eip155:1",
+      "eip155:42161",
+      "eip155:8453",
+      "near:mainnet",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    ]);
     expect(
       profiles
         .all()
         .filter((p) => p.watcher)
         .map((p) => p.chain)
         .sort(),
-    ).toEqual(["eip155:1", "eip155:42161", "eip155:8453"]);
+    ).toEqual([
+      "bip122:000000000019d6689c085ae165831e93",
+      "eip155:1",
+      "eip155:42161",
+      "eip155:8453",
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    ]);
     expect(profiles.byBlockchain("base")?.chain).toBe("eip155:8453");
     expect(profiles.view(profiles.get("eip155:8453") as never)).toMatchObject({
       blockchain: "base",
@@ -193,7 +206,7 @@ describe("chain profiles", () => {
           },
         ],
       },
-      /EVM chains only/,
+      /NEAR is tracked by the indexer/,
     ],
     [
       {
