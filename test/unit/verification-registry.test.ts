@@ -10,6 +10,7 @@ import {
   tierBAllowed,
 } from "../../src/domain/verification/verification.js";
 import { parseTokens } from "../../src/providers/oneclick/client.js";
+import { simTransfers } from "../../src/verifiers/verifier.js";
 
 const profiles = chainProfiles(parseYaml(readFileSync(new URL("../../config/chains.yaml", import.meta.url), "utf8")));
 const tokensJson = JSON.parse(readFileSync(new URL("../fixtures/oneclick/tokens.json", import.meta.url), "utf8"));
@@ -320,5 +321,27 @@ describe("token registry on the recorded 1Click list", () => {
     );
     expect(bad.map((r) => r.asset_id)).toEqual(["nep141:b.near"]);
     expect(parseTokens([{ nope: true }, ...tokensJson.slice(0, 1)])).toHaveLength(1);
+  });
+});
+
+describe("sandbox verifier transfers (spec 0.3.1 SimTx.transfers[].from)", () => {
+  const exp = { recipient: "0xabc", assetId: "nep141:usdc", expected: 100n };
+  it("uses the simulated sender of the largest counted transfer as Evidence.sender", () => {
+    const t = simTransfers([
+      { token: "nep141:usdc", from: "0xSOLVER", to: "0xABC", amount: "70" },
+      { token: "nep141:usdc", from: "0xother", to: "0xabc", amount: "30" },
+    ]);
+    expect(t[0]).toEqual({ to: "0xabc", from: "0xsolver", assetId: "nep141:usdc", amount: 70n });
+    expect(compareTransfers(t, exp)).toEqual({ result: "pass", amount: 100n, sender: "0xsolver" });
+  });
+  it("an absent, null or implausible from is unknown (null), never guessed", () => {
+    const t = simTransfers([
+      { token: "nep141:usdc", to: "0xabc", amount: "100" },
+      { token: "nep141:usdc", from: null, to: "0xabc", amount: "1" },
+      { token: "nep141:usdc", from: "", to: "0xabc", amount: "1" },
+      { token: "nep141:usdc", from: "x".repeat(65), to: "0xabc", amount: "1" },
+    ]);
+    expect(t.map((x) => x.from)).toEqual([null, null, null, null]);
+    expect(compareTransfers(t, exp).sender).toBeNull();
   });
 });

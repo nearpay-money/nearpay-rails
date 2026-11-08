@@ -36,7 +36,10 @@ export interface SandboxChains {
   tx(
     chain: string,
     hash: string,
-  ): Promise<{ finalized: boolean; transfers: { token: string; to: string; amount: string }[] } | null>;
+  ): Promise<{
+    finalized: boolean;
+    transfers: { token: string; from?: string | null | undefined; to: string; amount: string }[];
+  } | null>;
   events(
     cursor: number,
     limit: number,

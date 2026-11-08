@@ -255,9 +255,80 @@ describe("settlement of an agentpay execution", () => {
       (await get(`/internal/evidence?account_id=${ACCOUNT}&livemode=false&day=${day}&owner=payments`, "agentpay"))
         .status,
     ).toBe(403);
+  });
+});
+
+describe("evidence summary ?owner= (spec 0.3.1)", () => {
+  it("filters totals, tier_b, digest, in_flight and held_open by owner; complete stays account-wide; agentpay is narrowed", async () => {
+    const merchant = `sum${Date.now()}.near`;
+    const x = created(await post("/internal/executions", x402(merchant), "agentpay"));
+    const paid = created(await post("/internal/executions", routeQuote({ destination: { address: randomEvm() } })));
+    // open executions of both owners (counted by in_flight until they end)
+    created(await post("/internal/executions", x402(`open${Date.now()}.near`), "agentpay"));
+    created(await post("/internal/executions", routeQuote({ destination: { address: randomEvm() } })));
+    for (const e of [x, paid]) {
+      expect((await s.sandbox?.call("POST", "/sim/deposits", { deposit_address: e.deposit?.address }))?.status).toBe(
+        202,
+      );
+    }
+    expect((await post(`/internal/executions/${x.id}/signals`, { type: "payer_sent" }, "agentpay")).status).toBe(202);
+    expect((await post(`/internal/executions/${paid.id}/signals`, { type: "payer_sent" })).status).toBe(202);
+    await until(x.id, (e) => e.state === "succeeded");
+    const chainPaid = await until(paid.id, (e) => e.state === "succeeded");
+    // sandbox verifier evidence names the simulated sender (SimTx.transfers[].from, spec 0.3.1)
+    expect(chainPaid.evidence).toMatchObject({ tier: "A", sender: expect.any(String) });
+
+    const day = new Date().toISOString().slice(0, 10);
+    type Summary = {
+      complete: boolean;
+      in_flight: number;
+      held_open: number;
+      totals: { kind: string; state: string; asset_id: string; count: number; settled_amount: string }[];
+      tier_b: { count: number };
+      digest: string;
+    };
+    const summary = async (q: string, who: Who = "payments") => {
+      const r = await get(`/internal/evidence/summary?account_id=${ACCOUNT}&livemode=false&day=${day}${q}`, who);
+      expect(r.status).toBe(200);
+      return r.body as Summary;
+    };
+    const count = (s: Summary) => s.totals.reduce((n, t) => n + t.count, 0);
+    const listed = async (q: string) => {
+      const r = await get(`/internal/evidence?account_id=${ACCOUNT}&livemode=false&day=${day}&limit=1000${q}`);
+      return (r.body as { data: Execution[] }).data.length;
+    };
+    const [all, pay, agent, agentDefault] = await Promise.all([
+      summary(""),
+      summary("&owner=payments"),
+      summary("&owner=agentpay"),
+      summary("", "agentpay"),
+    ]);
+    expect(count(pay)).toBe(await listed("&owner=payments"));
+    expect(count(agent)).toBe(await listed("&owner=agentpay"));
+    expect(count(all)).toBe(count(pay) + count(agent));
+    expect(count(agent)).toBeGreaterThanOrEqual(1);
+    expect(count(pay)).toBeGreaterThanOrEqual(1);
+    expect(all.in_flight).toBe(pay.in_flight + agent.in_flight);
+    expect(all.held_open).toBe(pay.held_open + agent.held_open);
+    expect(agent.in_flight).toBeGreaterThanOrEqual(1);
+    expect(pay.in_flight).toBeGreaterThanOrEqual(1);
+    expect(all.tier_b.count).toBe(pay.tier_b.count + agent.tier_b.count);
+    expect(new Set([all.digest, pay.digest, agent.digest]).size).toBe(3);
+    expect(pay.complete).toBe(all.complete);
+    expect(agent.complete).toBe(all.complete);
+    // agentpay without owner is narrowed to its own executions; owner=payments is refused
+    expect({ ...agentDefault, generated_at: null }).toEqual({ ...agent, generated_at: null });
     expect(
-      (await get(`/internal/evidence/summary?account_id=${ACCOUNT}&livemode=false&day=${day}`, "agentpay")).status,
+      (
+        await get(
+          `/internal/evidence/summary?account_id=${ACCOUNT}&livemode=false&day=${day}&owner=payments`,
+          "agentpay",
+        )
+      ).status,
     ).toBe(403);
+    expect(
+      (await get(`/internal/evidence/summary?account_id=${ACCOUNT}&livemode=false&day=${day}&owner=nobody`)).status,
+    ).toBe(400);
   });
 });
 

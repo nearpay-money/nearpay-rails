@@ -80,10 +80,10 @@ export function railsRoutes(r: Rails): RouteBinding[] {
       return evidencePage(r, ctx.query, f.owner);
     }),
     implement(getEvidenceSummary, async (ctx) => {
-      // the summary has no owner filter (spec 0.3.0): agentpay may not read payments' totals
-      const f = listOwnerFilter(callerOf(ctx.principal), undefined);
-      if (!("ok" in f) || f.owner !== undefined) throw forbidden("read evidence summaries", "not for agentpay");
-      return evidenceSummary(r, ctx.query);
+      // spec 0.3.1 `?owner=`: agentpay is narrowed to its own executions (`owner=payments` → 403), like listEvidence
+      const f = listOwnerFilter(callerOf(ctx.principal), ctx.query.owner);
+      if (!("ok" in f)) throw refusalError(f, "read evidence summaries of this owner");
+      return evidenceSummary(r, ctx.query, f.owner);
     }),
     implement(listExecutionObservations, async (ctx) => {
       await readableRow(r, callerOf(ctx.principal), ctx.params.id);
