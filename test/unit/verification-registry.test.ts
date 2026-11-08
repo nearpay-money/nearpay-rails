@@ -20,6 +20,7 @@ describe("evidence comparison (§8.8)", () => {
     expect(compareTransfers([{ to: "0xabc", assetId: "nep141:usdc", amount: 100n }], expect_)).toEqual({
       result: "pass",
       amount: 100n,
+      sender: null,
     });
     expect(
       compareTransfers(
@@ -29,10 +30,11 @@ describe("evidence comparison (§8.8)", () => {
         ],
         expect_,
       ),
-    ).toEqual({ result: "pass", amount: 110n });
+    ).toEqual({ result: "pass", amount: 110n, sender: null });
     expect(compareTransfers([{ to: "0xabc", assetId: "nep141:usdc", amount: 99n }], expect_)).toEqual({
       result: "short",
       amount: 99n,
+      sender: null,
     });
     expect(
       compareTransfers(
@@ -43,7 +45,34 @@ describe("evidence comparison (§8.8)", () => {
         ],
         expect_,
       ),
-    ).toEqual({ result: "mismatch", amount: 0n });
+    ).toEqual({ result: "mismatch", amount: 0n, sender: null });
+  });
+
+  it("names the sender of the largest counted transfer (spec 0.3.0 Evidence.sender)", () => {
+    expect(
+      compareTransfers(
+        [
+          { to: "0xabc", from: "solver-a.near", assetId: "nep141:usdc", amount: 40n },
+          { to: "0xabc", from: "solver-b.near", assetId: "nep141:usdc", amount: 70n },
+          { to: "0xdef", from: "other.near", assetId: "nep141:usdc", amount: 500n },
+          { to: "0xabc", from: "wrong-asset.near", assetId: "nep141:usdt", amount: 900n },
+        ],
+        expect_,
+      ),
+    ).toEqual({ result: "pass", amount: 110n, sender: "solver-b.near" });
+    // a tie keeps the first; a short settlement still names its sender; a mismatch names none
+    expect(
+      compareTransfers(
+        [
+          { to: "0xabc", from: "first.near", assetId: "nep141:usdc", amount: 30n },
+          { to: "0xabc", from: "second.near", assetId: "nep141:usdc", amount: 30n },
+        ],
+        expect_,
+      ),
+    ).toEqual({ result: "short", amount: 60n, sender: "first.near" });
+    expect(
+      compareTransfers([{ to: "0xdef", from: "x.near", assetId: "nep141:usdc", amount: 100n }], expect_).sender,
+    ).toBeNull();
   });
 
   it("attributes by exact amount only when unambiguous", () => {

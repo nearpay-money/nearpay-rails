@@ -128,6 +128,8 @@ export type EvidenceRow = {
   source: "watcher" | "indexer" | "verifier" | "provider" | "operator";
   observed_at: string;
   explorer_url: string | null;
+  /** spec 0.3.0: the account that sent the settlement transfer, as the detector saw it (null = unknown). */
+  sender?: string | null;
 };
 
 export interface ExecutionsTable {
@@ -135,6 +137,8 @@ export interface ExecutionsTable {
   account_id: string;
   livemode: boolean;
   owner: Def<"payments" | "agentpay">;
+  /** spec 0.3.0 (§20): owner agentpay — the `near-intents` binding the quote was minted for. */
+  x402_binding: Opt<string>;
   kind: "payment" | "refund";
   method: "route_quote" | "intents_transfer";
   provider: "oneclick" | "sandbox" | "direct_intents";

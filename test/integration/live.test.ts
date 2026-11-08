@@ -247,6 +247,53 @@ describe("live quotes through the 1Click adapter", () => {
     await s.admin.db.updateTable("control_flags").set({ value: true }).where("name", "=", "quoting_enabled").execute();
   });
 
+  it("spec 0.3.0: an agentpay x402 quote runs §8.1 unchanged (appFees, integrity, signature, kill switch)", async () => {
+    const binding = "np1:4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+    const merchant = "x402merchant.near";
+    const body = {
+      ...live({
+        destination: { asset_id: USDC_BASE, type: "intents_account", chain: "near:mainnet", address: merchant },
+        pricing: { currency: "asset", asset_id: USDC_BASE, amount: "2500000" },
+        fee: { bearer: "payer" },
+      }),
+      idempotency_key: `x402:${binding}`,
+      owner: "agentpay",
+      x402_binding: binding,
+    };
+    const asAgentpay = (b: unknown) => s.call("POST", "/internal/executions", { body: b, service: "agentpay" });
+    // tampered recipient: refused like any quote
+    one.tamper = (q) => {
+      (q.quoteRequest as Record<string, unknown>).recipient = "thief.near";
+    };
+    const bad = await asAgentpay(body);
+    one.tamper = null;
+    expect([bad.status, error(bad).code]).toEqual([502, "quote_integrity_failed"]);
+    // kill switch: refused
+    await s.admin.db.updateTable("control_flags").set({ value: false }).where("name", "=", "quoting_enabled").execute();
+    const killed = await asAgentpay(body);
+    await s.admin.db.updateTable("control_flags").set({ value: true }).where("name", "=", "quoting_enabled").execute();
+    expect([killed.status, error(killed).code]).toEqual([503, "rail_unavailable"]);
+    // a clean quote
+    const r = await asAgentpay(body);
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const x = Execution.parse(r.body);
+    expect(x).toMatchObject({
+      livemode: true,
+      provider: "oneclick",
+      owner: "agentpay",
+      x402_binding: binding,
+      settlement: { amount_base: "2500000", recipient: merchant, recipient_type: "intents" },
+    });
+    const sent = one.requests.filter((q) => q.path === "/v0/quote").at(-1)?.body as Record<string, unknown>;
+    expect(sent).toMatchObject({
+      swapType: "EXACT_OUTPUT",
+      recipient: merchant,
+      recipientType: "INTENTS",
+      appFees: [{ recipient: TREASURY, fee: 20 }],
+      amount: x.settlement.expected,
+    });
+  });
+
   it("adapters assert their mode (INV-8) and send the partner key when configured", async () => {
     const p = oneClickProvider({ baseUrl: one.url, apiKey: "partner-key" });
     await expect(p.status(false, "0xabc", null)).rejects.toBeInstanceOf(ModeViolation);
@@ -358,6 +405,7 @@ describe("EVM destination watcher (Anvil)", () => {
       finality: "finalized",
       tx_hash: hash,
       chain: "eip155:8453",
+      sender: expect.stringMatching(/^0x[0-9a-f]{40}$/), // spec 0.3.0: the Transfer log's `from`
     });
     const un = await s.admin.db.selectFrom("unattributed_transfers").selectAll().where("tx_hash", "=", stray).execute();
     expect(un.map((u) => [u.amount, u.recipient])).toEqual([["12345", x.settlement.recipient]]);
@@ -403,7 +451,13 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
     expect((await get(x.id)).state).toBe("verifying"); // not finalized yet
     await anvil.mine(70);
     const done = await until(x.id, (e) => e.state === "succeeded");
-    expect(done.evidence).toMatchObject({ source: "verifier", tier: "A", tx_hash: hash, finality: "finalized" });
+    expect(done.evidence).toMatchObject({
+      source: "verifier",
+      tier: "A",
+      tx_hash: hash,
+      finality: "finalized",
+      sender: expect.stringMatching(/^0x[0-9a-f]{40}$/),
+    });
     const v = await s.admin.db
       .selectFrom("verifications")
       .selectAll()
@@ -443,7 +497,11 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
       txHashes: [hash],
     });
     const done = await until(id, (e) => e.state === "succeeded");
-    expect(done.evidence).toMatchObject({ tier: "A", amount: "1000000000000" });
+    expect(done.evidence).toMatchObject({
+      tier: "A",
+      amount: "1000000000000",
+      sender: expect.stringMatching(/^0x[0-9a-f]{40}$/), // the transaction's `from`
+    });
   });
 
   it("NEAR: the recorded mt_transfer to an Intents account passes; an unknown tx is held at the timeout", async () => {
@@ -484,6 +542,8 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
       finality: "final",
       amount: "1503822",
       chain: "near:mainnet",
+      // spec 0.3.0: the recorded mt_transfer's old_owner_id (Intents recipients MUST name the sender)
+      sender: "51e8f94d77b5e90dc9852ca6113771e11e8382ce69473a75e313e41665de7cbe",
     });
     expect(done.evidence?.block_ref).toBe("8XfH8iHtBgcjbEAFrcQKQjTGusvYh8VVprzRoiCoRUSt");
     const lost = await insertExecution({
@@ -548,6 +608,7 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
       tier: "B",
       source: "provider",
       finality: "confirmed",
+      sender: null, // provider-attested: no chain view of the sender (never guessed)
     });
     const big = await insertExecution({
       state: "verifying",

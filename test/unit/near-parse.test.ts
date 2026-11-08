@@ -46,6 +46,18 @@ describe("neardata block 223270700", () => {
     expect(new Set(credits.map((c) => `${c.txHash}|${c.logRef}`)).size).toBe(credits.length);
   });
 
+  it("names the sender of every credit (spec 0.3.0 Evidence.sender): DIP-4 account_id, NEP-245/NEP-141 old_owner_id", () => {
+    const credits = outcomes.flatMap((o) => creditsOf(o, ctx([USDC])));
+    const tx = credits.filter((c) => c.txHash === "F4j6f6d1V1tRycSMuTfVjFX2LN2dfQwWBmg1yF6Wu7Hv");
+    const sender = "437e16df6fd7cb37745ce0d104d1ecba34d80fcbe99f5d0b674be74548d3fc89";
+    expect(tx.map((c) => [c.kind, c.from])).toEqual([
+      ["binding", sender],
+      ["amount", sender],
+    ]);
+    expect(credits.find((c) => c.to === "hollowpine4417.near")?.from).toBe("dclv2.ref-labs.near");
+    expect(credits.every((c) => c.from !== null)).toBe(true);
+  });
+
   it("NEP-141 ft_transfers count only for watched token contracts", () => {
     const none = outcomes.flatMap((o) => creditsOf(o, ctx())).filter((c) => c.assetId === `nep141:${USDC}`);
     expect(none).toHaveLength(0);
@@ -143,9 +155,43 @@ describe("outcome filtering", () => {
       data: [{ account_id: "p.near", receiver_id: "m.near", tokens: { "nep141:x.near": "10" }, memo: "np1:abc" }],
     });
     expect(sandboxCredits("intents.near", "h", 7, [dip4, mt])).toEqual([
-      expect.objectContaining({ kind: "binding", to: "m.near", memo: "np1:abc", amount: 10n, blockRef: "7" }),
-      expect.objectContaining({ kind: "amount", to: "b.near", amount: 5n }),
+      expect.objectContaining({
+        kind: "binding",
+        to: "m.near",
+        from: "p.near",
+        memo: "np1:abc",
+        amount: 10n,
+        blockRef: "7",
+      }),
+      expect.objectContaining({ kind: "amount", to: "b.near", from: "a.near", amount: 5n }),
     ]);
+  });
+
+  it("a sender the event does not name (or names oddly) is unknown, never guessed", () => {
+    const anon = log({
+      standard: "nep245",
+      version: "1.0.0",
+      event: "mt_transfer",
+      data: [{ new_owner_id: "b.near", token_ids: ["nep141:x.near"], amounts: ["5"] }],
+    });
+    const odd = log({
+      standard: "nep245",
+      version: "1.0.0",
+      event: "mt_transfer",
+      data: [{ old_owner_id: 42, new_owner_id: "b.near", token_ids: ["nep141:x.near"], amounts: ["5"] }],
+    });
+    const ft = log({
+      standard: "nep141",
+      version: "1.0.0",
+      event: "ft_transfer",
+      data: [{ old_owner_id: "Payer.NEAR", new_owner_id: "m.near", amount: "7" }],
+    });
+    const base = { receiptId: "r", txHash: "t", success: true };
+    expect(creditsOf({ ...base, executor: "intents.near", logs: [anon, odd] }, ctx()).map((c) => c.from)).toEqual([
+      null,
+      null,
+    ]);
+    expect(creditsOf({ ...base, executor: "usdc.near", logs: [ft] }, ctx(["usdc.near"]))[0]?.from).toBe("payer.near");
   });
 });
 

@@ -203,9 +203,15 @@ export async function minimums(r: Rails, keysParam: string): Promise<RouteRespon
   return out;
 }
 
+/**
+ * `listEvidence`. `owner` (spec 0.3.0, §20): only that owner's executions — payments' reconciliation sends
+ * `payments` so agentpay's x402 executions never look like unmatched payments. The route passes the filter
+ * already narrowed by caller (agentpay only ever sees `agentpay`).
+ */
 export async function evidencePage(
   r: Rails,
   q: RouteQuery<typeof listEvidence>,
+  owner: "payments" | "agentpay" | undefined = q.owner as "payments" | "agentpay" | undefined,
 ): Promise<RouteResponse<typeof listEvidence>> {
   const account = toUuid(q.account_id, "acct");
   const start = new Date(`${q.day}T00:00:00.000Z`);
@@ -219,6 +225,7 @@ export async function evidencePage(
     .where("terminal_at", ">=", start)
     .where("terminal_at", "<", end);
   if (q.kind) query = query.where("kind", "=", q.kind as "payment" | "refund");
+  if (owner) query = query.where("owner", "=", owner);
   if (q.starting_after) query = query.where("id", ">", toUuid(q.starting_after, "ex"));
   const rows = await query
     .orderBy("id")
@@ -230,14 +237,15 @@ export async function evidencePage(
 export async function depositLookup(
   r: Rails,
   q: RouteQuery<typeof lookupExecutionByDeposit>,
+  owner?: "payments" | "agentpay",
 ): Promise<RouteResponse<typeof lookupExecutionByDeposit>> {
-  const row = await r.db
+  let query = r.db
     .selectFrom("executions")
     .select(["id", "account_id", "livemode"])
     .where("deposit_address", "=", q.deposit_address)
-    .where(sql<boolean>`coalesce(deposit_memo, '') = ${q.memo ?? ""}`)
-    .orderBy("created_at", "desc")
-    .executeTakeFirst();
+    .where(sql<boolean>`coalesce(deposit_memo, '') = ${q.memo ?? ""}`);
+  if (owner) query = query.where("owner", "=", owner);
+  const row = await query.orderBy("created_at", "desc").executeTakeFirst();
   if (!row) return { exists: false, execution_id: null, account_id: null, livemode: null };
   return {
     exists: true,

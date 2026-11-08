@@ -94,6 +94,9 @@ export function executionView(r: ExecutionRow): Execution {
     deposited_amount: intOrNull(r.deposited_amount),
     abandoned_at: isoOrNull(r.abandoned_at),
     abandon_reason: r.abandon_reason,
+    // spec 0.3.0 (§20): consumers ignore executions they do not own; events carry the same view
+    owner: r.owner,
+    x402_binding: r.owner === "agentpay" ? r.x402_binding : null,
   } as Execution;
 }
 

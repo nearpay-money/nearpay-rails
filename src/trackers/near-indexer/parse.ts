@@ -16,6 +16,8 @@ export interface Credit {
   /** `binding`: a DIP-4 transfer with a memo (matched by binding); `amount`: matched by amount. */
   readonly kind: "binding" | "amount";
   readonly to: string;
+  /** Sender as the event names it (spec 0.3.0 `Evidence.sender`): DIP-4 `account_id`, NEP-245/NEP-141 `old_owner_id`, ERC-20 `from`. */
+  readonly from: string | null;
   readonly assetId: string;
   readonly amount: bigint;
   readonly memo: string | null;
@@ -34,6 +36,11 @@ export interface ReceiptOutcome {
 }
 
 const UINT = /^\d{1,78}$/;
+
+/** A NEAR account named by an event as the sender, lower-cased; anything else is unknown (null). */
+export function senderOf(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 && v.length <= 64 ? v.toLowerCase() : null;
+}
 
 /** Success: `SuccessValue` or `SuccessReceiptId` (failures emit no balance changes). */
 export function outcomeSucceeded(status: Record<string, unknown>): boolean {
@@ -62,6 +69,7 @@ export function creditsOf(
             chain: ctx.chain,
             kind: "binding",
             to: (d.receiver_id as string).toLowerCase(),
+            from: senderOf(d.account_id),
             assetId: asset,
             amount: BigInt(amt),
             memo,
@@ -84,6 +92,7 @@ export function creditsOf(
             chain: ctx.chain,
             kind: "amount",
             to: (d.new_owner_id as string).toLowerCase(),
+            from: senderOf(d.old_owner_id),
             assetId: asset,
             amount: BigInt(amt),
             memo: null,
@@ -100,6 +109,7 @@ export function creditsOf(
           chain: ctx.chain,
           kind: "amount",
           to: d.new_owner_id.toLowerCase(),
+          from: senderOf(d.old_owner_id),
           assetId: `nep141:${o.executor}`,
           amount: BigInt(d.amount),
           memo: typeof d.memo === "string" ? d.memo : null,

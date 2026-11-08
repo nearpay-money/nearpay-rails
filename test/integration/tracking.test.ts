@@ -122,6 +122,9 @@ describe("route_quote lifecycle (sandbox scenarios)", () => {
       asset_id: USDC_NEAR,
       amount: x.settlement.expected,
     });
+    // spec 0.3.0: Intents-recipient evidence names the delivering account (the sandbox's solver)
+    if (done.evidence?.source === "indexer") expect(done.evidence.sender).toEqual(expect.any(String));
+    expect(done.owner).toBe("payments");
   });
 
   it("05: the destination receives one unit less — succeeded short (payments decides the review)", async () => {
@@ -221,6 +224,8 @@ describe("intents_transfer (sandbox Verifier + sandbox feed)", () => {
       recipient: merchant,
       amount: req.amount,
       finality: "final",
+      // spec 0.3.0: the DIP-4 transfer's account_id — the payer's Intents account
+      sender: payer,
     });
     expect(done.evidence?.tx_hash).toBe((ex.body as { tx_hash: string }).tx_hash);
     // spec 0.2.1: the executed payload's fee transfer is the observed fee; the payer moved amount + fee

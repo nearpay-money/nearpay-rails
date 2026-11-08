@@ -24,6 +24,7 @@ import {
   tagSpace,
 } from "../domain/execution/amounts.js";
 import { checkQuote } from "../domain/execution/integrity.js";
+import { type Caller, decideCreateOwner, type Owner } from "../domain/execution/owner.js";
 import { nextPollAt } from "../domain/execution/schedule.js";
 import {
   type Pricing,
@@ -35,6 +36,7 @@ import {
   usdMicros,
 } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
+import { refusalError } from "./access.js";
 import type { Rails } from "./context.js";
 import { readKillSwitch } from "./kill-switch.js";
 import { applyChange, emitExecution, lockExecution } from "./ledger.js";
@@ -72,8 +74,8 @@ export async function byKey(r: Rails, key: string): Promise<ExecutionRow | undef
   return r.db.selectFrom("executions").selectAll().where("idempotency_key", "=", key).executeTakeFirst();
 }
 
-export function replay(row: ExecutionRow, accountId: string, livemode: boolean): Execution {
-  if (row.account_id !== accountId || row.livemode !== livemode)
+export function replay(row: ExecutionRow, accountId: string, livemode: boolean, owner?: Owner): Execution {
+  if (row.account_id !== accountId || row.livemode !== livemode || (owner !== undefined && row.owner !== owner))
     throw new ApiError("idempotency_key_reused", { param: "idempotency_key" });
   return executionView(row);
 }
@@ -206,9 +208,10 @@ interface Prepared {
   originChain: string;
   amountUsdMicros: bigint | null;
   policy: PricingPolicy;
+  owner: Owner;
 }
 
-async function prepare(r: Rails, b: CreateBody, accountId: string): Promise<Prepared> {
+async function prepare(r: Rails, b: CreateBody, accountId: string, owner: Owner): Promise<Prepared> {
   const lm = b.livemode;
   const [o, d] = await Promise.all([tokenOf(r, lm, b.origin.asset_id), tokenOf(r, lm, b.destination.asset_id)]);
   if (!o?.enabled) throw unsupported(b.origin.asset_id, "origin.asset_id");
@@ -279,6 +282,7 @@ async function prepare(r: Rails, b: CreateBody, accountId: string): Promise<Prep
     originChain,
     amountUsdMicros: usdMicros(base, pricedToken(d), p),
     policy: p,
+    owner,
   };
 }
 
@@ -302,11 +306,19 @@ async function screen(r: Rails, b: CreateBody, x: Prepared): Promise<void> {
   }
 }
 
-export async function createExecution(r: Rails, b: CreateBody): Promise<Execution> {
+/**
+ * `POST /internal/executions`. The owner (§20) comes from the caller: payments creates `payments` executions,
+ * agentpay `agentpay` ones (cross-chain x402) — decided before anything else, replays included (fail closed).
+ */
+export async function createExecution(r: Rails, b: CreateBody, caller: Caller): Promise<Execution> {
+  const decided = decideCreateOwner(caller, b);
+  if (!("ok" in decided)) throw refusalError(decided, "create executions for this owner");
+  const owner = decided.owner;
   const accountId = toUuid(b.account_id, "acct");
   const existing = await byKey(r, b.idempotency_key);
   if (existing) {
-    if (existing.kind !== "payment") throw new ApiError("idempotency_key_reused", { param: "idempotency_key" });
+    if (existing.kind !== "payment" || existing.owner !== owner)
+      throw new ApiError("idempotency_key_reused", { param: "idempotency_key" });
     return replay(existing, accountId, b.livemode);
   }
 
@@ -322,9 +334,14 @@ export async function createExecution(r: Rails, b: CreateBody): Promise<Executio
     if (!(b.livemode ? r.providers.live : r.providers.test)) throw railUnavailable("route provider not configured");
   }
 
-  const x = await prepare(r, b, accountId);
+  const x = await prepare(r, b, accountId, owner);
   await screen(r, b, x);
   return b.method === "intents_transfer" ? createIntentsTransfer(r, b, x) : createRouteQuote(r, b, x);
+}
+
+/** Owner columns of a new execution (§20): `x402_binding` only for agentpay. */
+function ownerValues(b: CreateBody, x: Prepared): { owner: Owner; x402_binding: string | null } {
+  return { owner: x.owner, x402_binding: x.owner === "agentpay" ? (b.x402_binding ?? null) : null };
 }
 
 async function createRouteQuote(r: Rails, b: CreateBody, x: Prepared): Promise<Execution> {
@@ -365,7 +382,11 @@ async function createRouteQuote(r: Rails, b: CreateBody, x: Prepared): Promise<E
         : {
             amount: scenarioAmount(b),
             kind: "payment",
-            ...(b.reference ? { group: b.reference.payment_intent } : {}),
+            ...(b.reference
+              ? { group: b.reference.payment_intent }
+              : b.x402_binding && x.owner === "agentpay"
+                ? { group: b.x402_binding }
+                : {}),
           },
     );
     const seconds = (r.now() - started) / 1000;
@@ -489,6 +510,7 @@ async function insertRouteQuote(
         created_at: now,
         updated_at: now,
         reference: referenceOf(b),
+        ...ownerValues(b, x),
       };
       const row = await tx.insertInto("executions").values(values).returningAll().executeTakeFirstOrThrow();
       const obs = observationValues(x.id, "quote", "PENDING_DEPOSIT", q.raw, null, true);
@@ -515,7 +537,7 @@ async function insertRouteQuote(
       const winner = await byKey(r, b.idempotency_key);
       if (winner) {
         await releaseTag(r, x.id);
-        return replay(winner, x.accountId, b.livemode);
+        return replay(winner, x.accountId, b.livemode, x.owner);
       }
     }
     if (isUniqueViolation(e, "ex_deposit")) {
@@ -583,6 +605,7 @@ async function createIntentsTransfer(r: Rails, b: CreateBody, x: Prepared): Prom
           // no provider to poll: one check after the deadline expires it (§5 "Expiry")
           next_poll_at: new Date(x.deadline.getTime() + 10 * 60_000),
           reference: referenceOf(b),
+          ...ownerValues(b, x),
           version: 1,
           created_at: now,
           updated_at: now,
@@ -609,7 +632,7 @@ async function createIntentsTransfer(r: Rails, b: CreateBody, x: Prepared): Prom
   } catch (e) {
     if (isUniqueViolation(e, "executions_idempotency_key_key")) {
       const winner = await byKey(r, b.idempotency_key);
-      if (winner) return replay(winner, x.accountId, b.livemode);
+      if (winner) return replay(winner, x.accountId, b.livemode, x.owner);
     }
     throw e;
   }

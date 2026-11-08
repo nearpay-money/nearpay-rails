@@ -167,6 +167,8 @@ export interface EvidenceInput {
   readonly txHash: string | null;
   readonly blockRef: string | null;
   readonly recipient: string;
+  /** spec 0.3.0: sender of the settlement transfer as the detector saw it (null/absent = unknown). */
+  readonly sender?: string | null;
   readonly assetId: string;
   readonly amount: bigint;
   readonly finality: "final" | "finalized" | "confirmed";
@@ -222,6 +224,7 @@ export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: Evid
     source: e.source,
     observed_at: new Date(r.now()).toISOString(),
     explorer_url: explorerUrl(e.chain, e.txHash),
+    sender: e.sender ?? null,
   };
   if (decision.to === "held") {
     r.log.error({ execution: cur.id, alert: decision.alert }, "ALERT execution held");
