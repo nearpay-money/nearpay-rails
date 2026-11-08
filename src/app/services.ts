@@ -108,8 +108,21 @@ interface Built {
   serviceToken: () => Promise<string>;
 }
 
-function build(config: SharedConfig, deps: ServiceDeps, app: string): Built {
-  const database = deps.database ?? createDb<DB>({ url: config.dbUrl, applicationName: `rails-${app}` });
+/**
+ * Pool size of the feeds process. Every leader-elected loop (kit `advisoryLeader`) holds one pooled connection
+ * for as long as it leads, and the single feeds replica leads them all: with kit's default of 10, ten leaders
+ * (Stage 2: token/price/FX refresh, sandbox, NEAR indexer, three EVM watchers, Explorer, recurring jobs) took the
+ * whole pool and every query of the loops waited forever for a connection — the token registry was never
+ * refreshed, test-mode prices went stale (`pricing_unavailable`) and no feed advanced (step 2.4 integration).
+ */
+export const FEEDS_POOL_MAX = 32;
+/** Connections kept free for the loops' own queries, the job worker, the outbox relay and consumers. */
+export const FEEDS_QUERY_HEADROOM = 8;
+
+function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: number): Built {
+  const database =
+    deps.database ??
+    createDb<DB>({ url: config.dbUrl, applicationName: `rails-${app}`, ...(poolMax ? { max: poolMax } : {}) });
   const serviceToken =
     deps.serviceToken ??
     (() => {
@@ -306,7 +319,7 @@ export async function createFeeds(
   config: FeedsConfig,
   deps: FeedsDeps = {},
 ): Promise<{ service: Service; rails: Rails }> {
-  const b = build(config, deps, "feeds");
+  const b = build(config, deps, "feeds", FEEDS_POOL_MAX);
   const r = b.rails;
   const service = createService({ name: "rails", config, readiness: readiness(b.database) });
   attach(b, service, deps);
@@ -361,6 +374,7 @@ export async function createFeeds(
       ...(deps.tickMs ? { pollMs: deps.tickMs } : {}),
     }),
   );
+  let leaders = 1; // recurring jobs (below); each `leader(…)` adds one
   service.addBackground(
     recurringJobsTask({
       db: db.db,
@@ -381,14 +395,16 @@ export async function createFeeds(
     fx: 30 * 60_000,
     ...deps.intervals,
   };
-  const leader = (name: string, run: (signal: AbortSignal) => Promise<void>): BackgroundTask =>
-    leaderTask({
+  const leader = (name: string, run: (signal: AbortSignal) => Promise<void>): BackgroundTask => {
+    leaders++;
+    return leaderTask({
       pool: db.pool,
       name: `rails:${name}`,
       run,
       onError,
       ...(deps.tickMs ? { retryMs: deps.tickMs } : {}),
     });
+  };
 
   service.addBackground(
     leader("token-refresh", (signal) =>
@@ -514,8 +530,18 @@ export async function createFeeds(
       ),
     );
   }
+  // fail at boot rather than hang: leaders that hold the whole pool starve every query (see FEEDS_POOL_MAX)
+  assertFeedsPool(leaders, deps.database ? null : FEEDS_POOL_MAX);
   service.onShutdown(async () => {
     if (!deps.bus) await bus.close();
   });
   return { service, rails: r };
+}
+
+/** Throws when `leaders` held connections would leave fewer than FEEDS_QUERY_HEADROOM in a pool of `max`. */
+export function assertFeedsPool(leaders: number, max: number | null): void {
+  if (max !== null && leaders + FEEDS_QUERY_HEADROOM > max)
+    throw new Error(
+      `rails feeds: ${leaders} leader-elected loops need at least ${leaders + FEEDS_QUERY_HEADROOM} pooled connections (pool max ${max})`,
+    );
 }
