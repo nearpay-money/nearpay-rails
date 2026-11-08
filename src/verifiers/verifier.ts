@@ -237,6 +237,21 @@ async function verifyNear(
   return best ?? pending({ reason: "no destination transactions yet" });
 }
 
+/**
+ * A simulated transaction's transfers as the comparison reads them. Spec 0.3.1 `SimTx.transfers[].from` becomes the
+ * candidate `Evidence.sender` (null/absent or not a plausible account = the simulated chain did not say).
+ */
+export function simTransfers(
+  transfers: readonly { token: string; from?: string | null | undefined; to: string; amount: string }[],
+) {
+  return transfers.map((t) => ({
+    to: t.to.toLowerCase(),
+    from: senderOf(t.from),
+    assetId: t.token,
+    amount: BigInt(t.amount),
+  }));
+}
+
 async function verifySandbox(r: Rails, row: ExecutionRow, hashes: readonly string[]): Promise<VerifyOutcome> {
   const chains = r.providers.test?.chains;
   if (!chains) return pending({ reason: "sandbox not configured" });
@@ -253,13 +268,7 @@ async function verifySandbox(r: Rails, row: ExecutionRow, hashes: readonly strin
       best = pending({ hash, reason: "simulated tx not final" });
       continue;
     }
-    // SimTx transfers name no sender in spec 0.3.0 (change request); a `from` the sandbox sends anyway is used
-    const transfers = tx.transfers.map((t) => ({
-      to: t.to.toLowerCase(),
-      from: senderOf((t as { from?: unknown }).from),
-      assetId: t.token,
-      amount: BigInt(t.amount),
-    }));
+    const transfers = simTransfers(tx.transfers);
     const c = compareTransfers(transfers, { recipient, assetId: row.destination_asset_id, expected });
     const out: VerifyOutcome = {
       result: c.result,

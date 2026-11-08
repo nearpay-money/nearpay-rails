@@ -8,6 +8,7 @@ import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import type { EvidenceSummary, getEvidenceSummary, ProviderObservation } from "@nearpay-internal/spec";
+import type { Owner } from "../domain/execution/owner.js";
 import { dayComplete, evidenceDigest, utcDay } from "../domain/reconciliation/digest.js";
 import type { Rails } from "./context.js";
 import { getExecutionRow } from "./executions.js";
@@ -51,7 +52,16 @@ export async function observationsPage(
 
 const TRACKER_CURSORS = (name: string) => name === "near-indexer" || name === "explorer" || name.startsWith("evm:");
 
-export async function evidenceSummary(r: Rails, q: RouteQuery<typeof getEvidenceSummary>): Promise<EvidenceSummary> {
+/**
+ * `owner` (spec 0.3.1) narrows `totals`, `tier_b`, `digest`, `in_flight` and `held_open` to that owner's executions;
+ * `complete` stays account-wide (it says whether the day's evidence can still change, whoever owns it). The route
+ * passes the caller-resolved owner, never the raw query value.
+ */
+export async function evidenceSummary(
+  r: Rails,
+  q: RouteQuery<typeof getEvidenceSummary>,
+  owner: Owner | undefined,
+): Promise<EvidenceSummary> {
   const account = toUuid(q.account_id, "acct");
   let range: { start: Date; end: Date };
   try {
@@ -63,13 +73,16 @@ export async function evidenceSummary(r: Rails, q: RouteQuery<typeof getEvidence
   const now = new Date(r.now());
   const lm = q.livemode;
 
-  const day = r.db
+  let day = r.db
     .selectFrom("executions")
     .where("account_id", "=", account)
     .where("livemode", "=", lm)
     .where("state", "in", ["succeeded", "refunded", "failed"])
     .where("terminal_at", ">=", start)
     .where("terminal_at", "<", end);
+  if (owner) day = day.where("owner", "=", owner);
+  // `in_flight`/`held_open` count the owner's open executions; `open_before_end` (completeness) counts every owner's
+  const ownerMatch = owner ? sql<boolean>`owner = ${owner}` : sql<boolean>`true`;
 
   const [totals, members, tierB, open, cursors] = await Promise.all([
     day
@@ -96,8 +109,8 @@ export async function evidenceSummary(r: Rails, q: RouteQuery<typeof getEvidence
     r.db
       .selectFrom("executions")
       .select([
-        sql<string>`count(*)::text`.as("in_flight"),
-        sql<string>`count(*) filter (where state = 'held')::text`.as("held_open"),
+        sql<string>`count(*) filter (where ${ownerMatch})::text`.as("in_flight"),
+        sql<string>`count(*) filter (where state = 'held' and ${ownerMatch})::text`.as("held_open"),
         sql<string>`count(*) filter (where state <> 'held' and deadline < ${end})::text`.as("open_before_end"),
       ])
       .where("account_id", "=", account)
