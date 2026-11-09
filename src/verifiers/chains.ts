@@ -22,6 +22,7 @@ import {
   checkBitcoinTransfer,
   confirmationsRequired,
   normalizeBitcoinAddress,
+  outputsTo,
   snapshotUsdMicros,
 } from "../domain/chains/bitcoin.js";
 import { checkSolanaTransfer, splAssetId, TOKEN_PROGRAM } from "../domain/chains/solana.js";
@@ -153,8 +154,14 @@ export async function verifyBitcoin(
       continue;
     }
     if (esplora.urls.length > 1 && (await needsAgreement())) {
+      // §21.3: the second endpoint must report the same amount to the destination and the same block
       const other = await esplora.tx(txid, 1).catch(() => null);
-      if (!other?.status.confirmed || other.status.block_hash?.toLowerCase() !== c.detail.block_hash)
+      const otherAmount = other ? outputsTo(other, address).reduce((a, o) => a + o.value, 0n) : null;
+      if (
+        !other?.status.confirmed ||
+        other.status.block_hash?.toLowerCase() !== c.detail.block_hash ||
+        otherAmount !== c.amount
+      )
         return pending({ hash: txid, reason: "second Esplora does not agree yet" });
     }
     return {
@@ -249,6 +256,8 @@ export async function sandboxChainOutcome(
   }
   if (c.result === "mismatch")
     return { ...pending({ hash, simulated: true }), result: "mismatch", txHash: hash, blockRef };
+  // Evidence.solana.slot = Evidence.block_ref: without the simulated slot there is nothing to record (fail closed)
+  if (blockRef === null) return pending({ hash, reason: "simulated slot unknown", simulated: true });
   const m = await solanaMint(r, row);
   const mint = "mint" in m ? m.mint : null;
   const accounts = (add.transfers ?? []).flatMap((t, i) =>
@@ -256,7 +265,7 @@ export async function sandboxChainOutcome(
   );
   const detail: SolanaEvidence = {
     signature: hash,
-    slot: blockRef === null ? 0 : Number(blockRef),
+    slot: Number(blockRef),
     block_time: null,
     mint,
     token_program: mint ? TOKEN_PROGRAM : null,

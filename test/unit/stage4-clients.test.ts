@@ -1,7 +1,8 @@
 /** Stage 4 pools and clients (§21.4) with an injected fetch: failover, hedging, 429 back-off, health; sandbox vault feed. */
 import { describe, expect, it } from "vitest";
 import type { Rails } from "../../src/app/context.js";
-import { esploraClient } from "../../src/infra/clients/esplora.js";
+import type { ExecutionRow } from "../../src/app/views.js";
+import { type Esplora, esploraClient } from "../../src/infra/clients/esplora.js";
 import {
   endpointPool,
   PoolRateLimited,
@@ -10,7 +11,9 @@ import {
   unhealthy,
 } from "../../src/infra/clients/pool.js";
 import { solanaRpc } from "../../src/infra/clients/solana.js";
+import { BITCOIN_CONFIRMATION_TIERS } from "../../src/spec-0.4.0.js";
 import { sandboxVaultReceipts } from "../../src/trackers/near-indexer/indexer.js";
+import { verifyBitcoin } from "../../src/verifiers/chains.js";
 import { specVector } from "../support/vectors.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: vector JSON
@@ -226,5 +229,46 @@ describe("sandbox vault stand-in feed (§8.6 v1.10)", () => {
       ["R1", 2, "mandate_created", "vault.sandbox.near"],
     ]);
     expect(out.rejected).toEqual(["failed_receipt"]);
+  });
+});
+
+describe("Bitcoin verifier agreement (§21.3: same amount and block from a second endpoint)", () => {
+  const c = V.evidence.bitcoin.cases[0];
+  const address = "bc1qgjvrfv789jcls63y95cgan53lq88jnuh32w0fq";
+  const row = {
+    livemode: true,
+    destination_key: `${c.evidence.chain}|${address}`,
+    destination_asset_id: "nep141:btc.omft.near",
+    destination_decimals: 8,
+    amount_out_expected: c.expected_amount,
+    price_snapshot: { primary_usd: "80000", secondary_usd: null },
+  } as unknown as ExecutionRow;
+  const fake = (second: Any): Esplora => ({
+    urls: ["a", "b"],
+    tx: async (_t, i) => (i === 1 ? second : c.esplora_tx),
+    tipHeight: async () => c.tip_height,
+    addressTxs: async () => [],
+    health: () => ({ lastOkMs: null, failingSinceMs: null }),
+  });
+  const run = (second: Any) =>
+    verifyBitcoin({} as Rails, fake(second), row, [c.esplora_tx.txid], BITCOIN_CONFIRMATION_TIERS, async () => true);
+
+  it("agrees → pass", async () => {
+    expect((await run(structuredClone(c.esplora_tx))).result).toBe("pass");
+  });
+  it("same block, different amount to the destination → not yet", async () => {
+    const other = structuredClone(c.esplora_tx);
+    for (const o of other.vout) o.value += 1;
+    expect(await run(other)).toMatchObject({
+      result: "pending",
+      details: { reason: "second Esplora does not agree yet" },
+    });
+  });
+  it("different block or unconfirmed or unreachable → not yet", async () => {
+    const other = structuredClone(c.esplora_tx);
+    other.status.block_hash = "00".repeat(32);
+    expect((await run(other)).result).toBe("pending");
+    expect((await run({ ...c.esplora_tx, status: { confirmed: false } })).result).toBe("pending");
+    expect((await run(null)).result).toBe("pending");
   });
 });

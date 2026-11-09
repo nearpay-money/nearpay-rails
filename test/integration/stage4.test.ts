@@ -756,6 +756,10 @@ describe("sandbox evidence adapter (§21.5)", () => {
     expect((await sandboxChainOutcome(s.rails, row, "solana", hash, { ...tx, failed: true }, tr, [])).result).toBe(
       "pending",
     );
+    // no simulated slot → nothing to record as Evidence.solana.slot: not final (fail closed)
+    expect((await sandboxChainOutcome(s.rails, row, "solana", hash, { ...tx, block_ref: null }, tr, [])).result).toBe(
+      "pending",
+    );
   });
 });
 
