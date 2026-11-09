@@ -18,11 +18,11 @@ import type { createExecution as createExecutionRoute, Execution, OneClickQuoteR
 import {
   baseAfterBearer,
   binding as bindingOf,
+  destinationTagSpace,
   executionDeadline,
   feeShareOfAmountIn,
   intentsFee,
   tagCandidates,
-  tagSpace,
 } from "../domain/execution/amounts.js";
 import { checkQuote } from "../domain/execution/integrity.js";
 import { type Caller, decideCreateOwner, type Owner } from "../domain/execution/owner.js";
@@ -349,7 +349,8 @@ function ownerValues(b: CreateBody, x: Prepared): { owner: Owner; x402_binding: 
 async function createRouteQuote(r: Rails, b: CreateBody, x: Prepared): Promise<Execution> {
   const lm = b.livemode;
   const provider = (lm ? r.providers.live : r.providers.test) as NonNullable<Rails["providers"]["live"]>;
-  const space = tagSpace(unitValue(pricedToken(x.d), x.policy).usd, x.d.decimals);
+  const destFamily = r.profiles.get(x.d.chain)?.family ?? "";
+  const space = destinationTagSpace(destFamily, unitValue(pricedToken(x.d), x.policy).usd, x.d.decimals);
   const tag = await allocateTag(r, x.id, x.key, x.base, space);
   const feeRecipient = lm ? (r.treasury as string) : r.testTreasury;
   const route = x.route as Exclude<RouteClass, "intents_transfer">;

@@ -17,6 +17,7 @@ import {
   type EsploraTx,
 } from "../../src/domain/chains/bitcoin.js";
 import { checkSolanaTransfer, type SolanaTx } from "../../src/domain/chains/solana.js";
+import { destinationTagSpace, tagSpace } from "../../src/domain/execution/amounts.js";
 import { BITCOIN_CONFIRMATION_TIERS } from "../../src/spec-0.4.0.js";
 import { vaultEventsOf } from "../../src/trackers/near-indexer/vault.js";
 import { specVector } from "../support/vectors.js";
@@ -217,6 +218,24 @@ describe("vault forwarding rule", () => {
           expect(out.records.length).toBe(ok ? logs.length : 0);
           expect(out.rejected.length).toBe(ok ? 0 : logs.length);
           expect(new Set(out.records.map((r) => `${r.receipt_id}:${r.log_index}`)).size).toBe(out.records.length);
+        },
+      ),
+    );
+  });
+});
+
+describe("Bitcoin is never amount-tagged (§21.1, owner decision)", () => {
+  it("any BTC price, any decimals → tag space 0; other families follow tagSpace", () => {
+    fc.assert(
+      fc.property(
+        fc.bigInt({ min: 1n, max: 10n ** 12n }),
+        fc.bigInt({ min: 1n, max: 10n ** 6n }),
+        fc.integer({ min: 0, max: 24 }),
+        fc.constantFrom("evm", "near", "solana"),
+        (num, den, decimals, other) => {
+          const usd = { num, den };
+          expect(destinationTagSpace("bitcoin", usd, decimals)).toBe(0);
+          expect(destinationTagSpace(other, usd, decimals)).toBe(tagSpace(usd, decimals));
         },
       ),
     );

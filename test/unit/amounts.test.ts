@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   baseAfterBearer,
   binding,
+  destinationTagSpace,
   executionDeadline,
   intentsFee,
   parUnitsCeil,
@@ -32,6 +33,9 @@ describe("amount tags (§8.3)", () => {
     expect(tagSpace(rational(1n), 6)).toBe(9_999); // USDC: 10,000 → capped
     expect(tagSpace(rational(2500n), 18)).toBe(9_999); // ETH
     expect(tagSpace(rational(80_000n), 8)).toBe(0); // BTC: 12 slots < 100 → untagged
+    // BTC at USD 5,000 would give 200 slots, but Bitcoin destinations are never tagged (§21.1)
+    expect(tagSpace(rational(5_000n), 8)).toBe(200);
+    expect(destinationTagSpace("bitcoin", rational(5_000n), 8)).toBe(0);
     expect(tagSpace(rational(1n), 4)).toBe(100); // exactly 100 slots
     expect(tagSpace(rational(1n), 3)).toBe(0);
     expect(tagSpace(rational(0n), 6)).toBe(0);
