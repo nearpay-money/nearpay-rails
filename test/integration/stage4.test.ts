@@ -522,7 +522,7 @@ describe("tiers (§21.4)", () => {
   });
 
   it("the chain profiles route carries the Stage 4 fields", async () => {
-    const r = await s.call("GET", "/internal/chain_profiles");
+    const r = await s.call("GET", "/internal/chain-profiles");
     const p = (r.body as { profiles: Any[] }).profiles;
     expect(p.find((x) => x.chain === BITCOIN)).toMatchObject({
       tier: "A",
@@ -645,7 +645,8 @@ describe("Bitcoin watcher (§21.2, signal only)", () => {
       decimals: 8,
       base: 100_000n,
     });
-    const script = "00140e9748184216a4faad7751dfcccf4982d7138b00";
+    const { addressToScript, scriptToAddress } = await import("../../src/domain/chains/bitcoin.js");
+    const script = addressToScript(addr) as string;
     const pay = (confirmed: boolean): EsploraTx => ({
       txid: txid(),
       vout: [{ scriptpubkey: script, value: 100_000 }],
@@ -653,7 +654,6 @@ describe("Bitcoin watcher (§21.2, signal only)", () => {
         ? { confirmed: true, block_height: 900_100, block_hash: "ab".repeat(32) }
         : { confirmed: false },
     });
-    const { scriptToAddress } = await import("../../src/domain/chains/bitcoin.js");
     expect(scriptToAddress(script)).toBe(addr);
     btcAddr.set(addr, [pay(true)]);
     const esplora = esploraClient({ urls: [esp.url] });
@@ -804,7 +804,7 @@ describe("vault event forwarding (§8.6)", () => {
     const rows = await s.admin.db.selectFrom("vault_events").selectAll().orderBy("log_index").execute();
     expect(rows.map((r) => `${r.receipt_id}:${r.log_index}:${r.event}`)).toEqual([
       `${ok}:1:mandate_created`,
-      `${ok}:3:collected`,
+      `${ok}:2:collected`, // position in the receipt's logs: ["unrelated log", mandate_created, collected]
     ]);
     const out = await s.admin.db
       .selectFrom("outbox")
