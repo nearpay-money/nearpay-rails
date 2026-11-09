@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
+import { BITCOIN_MAINNET, SOLANA_MAINNET } from "@nearpay/spec";
 import type { KeySource } from "@nearpay-internal/auth";
 import { serviceTokenClient } from "@nearpay-internal/auth";
 import {
@@ -58,7 +59,6 @@ import { oneClickProvider } from "../providers/oneclick/client.js";
 import { coingeckoProvider } from "../providers/prices/coingecko.js";
 import { type PriceProvider, PriceRateLimited } from "../providers/prices/port.js";
 import { sandboxProvider } from "../providers/sandbox/client.js";
-import { BITCOIN_MAINNET, SOLANA_MAINNET } from "../spec-0.4.0.js";
 import { loop } from "../trackers/cursors.js";
 import { bitcoinWatchOnce } from "../trackers/destination-watchers/bitcoin-watcher.js";
 import { watchOnce } from "../trackers/destination-watchers/evm-watcher.js";

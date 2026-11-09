@@ -10,9 +10,10 @@
  * - Test: the sandbox's simulated Verifier events (`/sim/intents/events`) through the same parser
  *   and matching code.
  */
+
+import type { VaultEventRecord } from "@nearpay-internal/spec";
 import type { Rails } from "../../app/context.js";
 import type { Neardata } from "../../infra/clients/near.js";
-import type { VaultEventRecord } from "../../spec-0.4.0.js";
 import { clearCursor, readCursor, writeCursor } from "../cursors.js";
 import { matchCredits } from "../matching.js";
 import { type Credit, creditsOf, outcomesOfBlock } from "./parse.js";

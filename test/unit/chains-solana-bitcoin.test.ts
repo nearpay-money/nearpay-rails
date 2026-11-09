@@ -1,4 +1,12 @@
 /** Solana and Bitcoin parsing against the spec vectors (lld/rails.md §21, spec 0.4.0 `chains-solana-bitcoin.json`). */
+
+import {
+  BITCOIN_CONFIRMATION_TIERS,
+  BitcoinEvidence,
+  parseOmftAssetId,
+  requiredConfirmations,
+  SolanaEvidence,
+} from "@nearpay/spec";
 import { describe, expect, it } from "vitest";
 import {
   checkBitcoinTransfer,
@@ -23,13 +31,6 @@ import {
   splAssetId,
   TOKEN_PROGRAM,
 } from "../../src/domain/chains/solana.js";
-import {
-  BITCOIN_CONFIRMATION_TIERS,
-  BitcoinEvidence,
-  parseOmftAssetId,
-  requiredConfirmations,
-  SolanaEvidence,
-} from "../../src/spec-0.4.0.js";
 import { specVector } from "../support/vectors.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: vector JSON

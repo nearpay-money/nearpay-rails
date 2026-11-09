@@ -12,11 +12,13 @@
  * - Tier B chains: the provider's word within `NP_TIER_B_LIMITS`.
  * Not final / not found → retried every 10 s until `verification_timeout_s` → `held`.
  */
+
 import { sql } from "@nearpay-internal/db";
 import { parseEventLogs } from "@nearpay-internal/intents";
 import { verificationTier } from "../app/chain-tier.js";
 import type { Rails } from "../app/context.js";
 import { applyChange, lockExecution } from "../app/ledger.js";
+import type { EvidenceChainDetail } from "../app/observations.js";
 import { applyEvidence, type EvidenceInput } from "../app/observations.js";
 import { policyFor } from "../app/pricing.js";
 import { tokenOf } from "../app/tokens.js";
@@ -33,7 +35,6 @@ import type { Esplora } from "../infra/clients/esplora.js";
 import { type EvmRpc, erc20Transfers } from "../infra/clients/evm.js";
 import type { NearRpc } from "../infra/clients/near.js";
 import type { SolanaRpc } from "../infra/clients/solana.js";
-import type { EvidenceChainDetail } from "../spec-0.4.0.js";
 import { outcomeSucceeded, senderOf } from "../trackers/near-indexer/parse.js";
 import { sandboxChainOutcome, toKey, verifyBitcoin, verifySolana } from "./chains.js";
 

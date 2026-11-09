@@ -8,6 +8,8 @@
  *   the mempool never counts.
  * - Vault forwarding: a line is forwarded iff executor = vault ∧ success ∧ final ∧ schema-valid.
  */
+
+import { BITCOIN_CONFIRMATION_TIERS } from "@nearpay/spec";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
@@ -18,7 +20,6 @@ import {
 } from "../../src/domain/chains/bitcoin.js";
 import { checkSolanaTransfer, type SolanaTx } from "../../src/domain/chains/solana.js";
 import { destinationTagSpace, tagSpace } from "../../src/domain/execution/amounts.js";
-import { BITCOIN_CONFIRMATION_TIERS } from "../../src/spec-0.4.0.js";
 import { vaultEventsOf } from "../../src/trackers/near-indexer/vault.js";
 import { specVector } from "../support/vectors.js";
 

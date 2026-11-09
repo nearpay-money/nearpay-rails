@@ -3,9 +3,10 @@
  * windows and evidence timeouts. Pure: the profile file is parsed by infra; this module validates it
  * against the kit chain registry (address formats and explorers live there).
  */
+
+import type { ConfirmationTier } from "@nearpay/spec";
 import { type ChainInfo, getChain } from "@nearpay-internal/chains";
 import { z } from "zod";
-import type { ConfirmationTier } from "../../spec-0.4.0.js";
 
 export const ChainProfileInput = z.object({
   chain: z.string().regex(/^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/),
@@ -162,7 +163,7 @@ export class ChainProfiles {
       verification_timeout_s: p.verificationTimeoutS,
       memo_mode: p.memoMode,
       explorer_tx_url: p.explorerTxUrl,
-      // spec 0.4.0 (optional; the 0.3.1 schema passes unknown response fields through)
+      // spec 0.4.0 ChainProfile fields
       explorer_address_url: p.explorerAddressUrl,
       confirmation_tiers: p.confirmationTiers ? p.confirmationTiers.map((t) => ({ ...t })) : null,
     };

@@ -14,6 +14,13 @@
  *   `<chain>|<block_ref>`).
  */
 import { createHash } from "node:crypto";
+import {
+  BITCOIN_CONFIRMATION_TIERS,
+  type BitcoinEvidence,
+  type ConfirmationTier,
+  type SolanaEvidence,
+} from "@nearpay/spec";
+import { SimTx } from "@nearpay-internal/spec";
 import type { Rails } from "../app/context.js";
 import { tokenOf } from "../app/tokens.js";
 import type { ExecutionRow } from "../app/views.js";
@@ -29,13 +36,6 @@ import { checkSolanaTransfer, splAssetId, TOKEN_PROGRAM } from "../domain/chains
 import { compareTransfers, type ObservedTransfer } from "../domain/verification/verification.js";
 import type { Esplora } from "../infra/clients/esplora.js";
 import type { SolanaRpc } from "../infra/clients/solana.js";
-import {
-  BITCOIN_CONFIRMATION_TIERS,
-  type BitcoinEvidence,
-  type ConfirmationTier,
-  SimTxAdditions,
-  type SolanaEvidence,
-} from "../spec-0.4.0.js";
 import type { VerifyOutcome } from "./verifier.js";
 
 const pending = (details: Record<string, unknown>, result: "pending" | "not_found" = "pending"): VerifyOutcome => ({
@@ -206,13 +206,15 @@ export async function sandboxChainOutcome(
   transfers: readonly ObservedTransfer[],
   tiers: readonly ConfirmationTier[],
 ): Promise<VerifyOutcome> {
-  const extra = SimTxAdditions.safeParse(tx);
-  const add = extra.success ? extra.data : {};
+  const parsed = SimTx.safeParse(tx);
+  // a simulated transaction that does not parse as the spec's SimTx proves nothing (fail closed)
+  if (!parsed.success) return pending({ hash, reason: "simulated tx does not parse", simulated: true });
+  const add = parsed.data;
   const recipient = recipientOf(row);
   const expected = BigInt(row.amount_out_expected);
   if (family === "solana" && add.failed === true)
     return pending({ hash, reason: "simulated transaction failed (meta.err)", simulated: true });
-  const raw = (tx as { transfers?: { to: string; token: string; amount: string }[] }).transfers ?? [];
+  const raw = add.transfers;
   const counted = (i: number) => {
     const t = raw[i];
     return t !== undefined && toKey(row.destination_chain, t.to) === recipient && t.token === row.destination_asset_id;
@@ -227,9 +229,9 @@ export async function sandboxChainOutcome(
     if (confirmations < required || blockRef === null)
       return pending({ hash, reason: "not enough confirmations", confirmations, required, simulated: true });
     const script = addressToScript(recipient);
-    const outputs = (add.transfers ?? []).flatMap((t, i) =>
+    const outputs = add.transfers.flatMap((t, i) =>
       counted(i) && typeof t.vout === "number" && script
-        ? [{ vout: t.vout, value: (raw[i] as { amount: string }).amount, script_pubkey: script }]
+        ? [{ vout: t.vout, value: t.amount, script_pubkey: script }]
         : [],
     );
     if (outputs.length === 0) return pending({ hash, reason: "simulated outputs carry no vout", simulated: true });
@@ -260,7 +262,7 @@ export async function sandboxChainOutcome(
   if (blockRef === null) return pending({ hash, reason: "simulated slot unknown", simulated: true });
   const m = await solanaMint(r, row);
   const mint = "mint" in m ? m.mint : null;
-  const accounts = (add.transfers ?? []).flatMap((t, i) =>
+  const accounts = add.transfers.flatMap((t, i) =>
     counted(i) && typeof t.token_account === "string" && t.token_account ? [t.token_account] : [],
   );
   const detail: SolanaEvidence = {

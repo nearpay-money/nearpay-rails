@@ -10,11 +10,12 @@ import { httpClient } from "@nearpay-internal/http";
 import {
   type OneClickQuoteRequest,
   type OneClickQuoteResponse,
+  type SimTx,
   sandboxGetTx,
   sandboxIntentsEvents,
 } from "@nearpay-internal/spec";
 import bs58 from "bs58";
-import type { SimEventReceiptFields } from "../../spec-0.4.0.js";
+import type { z } from "zod";
 import { oneClickCalls, textFetch } from "../oneclick/client.js";
 import { assertMode, type RouteProvider, type Scenario } from "../port.js";
 
@@ -35,31 +36,8 @@ export interface SandboxOptions {
 }
 
 export interface SandboxChains {
-  tx(
-    chain: string,
-    hash: string,
-  ): Promise<{
-    finalized: boolean;
-    transfers: {
-      token: string;
-      from?: string | null | undefined;
-      to: string;
-      amount: string;
-      // spec 0.4.0 (passed through by the 0.3.1 loose schema; read via `SimTxAdditions`)
-      vout?: number | null | undefined;
-      token_account?: string | null | undefined;
-    }[];
-    block_ref?: string | null | undefined;
-    confirmations?: number | null | undefined;
-    failed?: boolean | undefined;
-  } | null>;
-  events(
-    cursor: number,
-    limit: number,
-  ): Promise<{
-    events: ({ seq: number; tx_hash: string; block_height: number; log: string } & SimEventReceiptFields)[];
-    next_cursor: number;
-  }>;
+  tx(chain: string, hash: string): Promise<z.output<typeof SimTx> | null>;
+  events(cursor: number, limit: number): Promise<z.output<typeof sandboxIntentsEvents.response>>;
 }
 
 export function sandboxProvider(o: SandboxOptions): RouteProvider & { chains: SandboxChains } {

@@ -4,6 +4,7 @@
  * those that are not older than the stored provider timestamp are applied (§5 "Monotonic").
  */
 import { createHash } from "node:crypto";
+import type { Evidence } from "@nearpay/spec";
 import { explorerTxUrl, getChain } from "@nearpay-internal/chains";
 import { uuidv7 } from "@nearpay-internal/ids";
 import type { OneClickStatusResponse } from "@nearpay-internal/spec";
@@ -12,10 +13,12 @@ import { isExpired, LATE_REFUND_WINDOW_MS, nextPollAt } from "../domain/executio
 import { decideEvidence, decideProviderStatus, type HeldReason, type State } from "../domain/execution/state.js";
 import type { VerificationResult } from "../domain/verification/verification.js";
 import type { EvidenceRow, ObservationSource } from "../infra/db/schema.js";
-import type { EvidenceChainDetail } from "../spec-0.4.0.js";
 import type { Rails, Tx } from "./context.js";
 import { applyChange, type Change, type ChangeMeta, lockExecution } from "./ledger.js";
 import type { ExecutionRow } from "./views.js";
+
+/** `Evidence.solana` / `Evidence.bitcoin` (spec 0.4.0) as an observation carries them. */
+export type EvidenceChainDetail = Pick<Evidence, "solana" | "bitcoin">;
 
 export function observationValues(
   executionId: string,
@@ -189,6 +192,25 @@ function explorerUrl(chain: string, tx: string): string | null {
   }
 }
 
+/** The `Evidence` object an execution carries once settled (spec 0.4.0 incl. `solana` / `bitcoin`). Pure. */
+export function evidenceRecord(e: EvidenceInput & { readonly txHash: string }, observedAt: Date): EvidenceRow {
+  return {
+    chain: e.chain,
+    tx_hash: e.txHash,
+    block_ref: e.blockRef,
+    recipient: e.recipient,
+    asset_id: e.assetId,
+    amount: e.amount.toString(),
+    finality: e.finality,
+    tier: e.tier,
+    source: e.source,
+    observed_at: observedAt.toISOString(),
+    explorer_url: explorerUrl(e.chain, e.txHash),
+    sender: e.sender ?? null,
+    ...(e.chainDetail ? { solana: e.chainDetail.solana ?? null, bitcoin: e.chainDetail.bitcoin ?? null } : {}),
+  };
+}
+
 /** Records a verification and, for pass/short, settles the locked execution (INV-2). */
 export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: EvidenceInput): Promise<ExecutionRow> {
   const verificationId = uuidv7();
@@ -215,21 +237,7 @@ export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: Evid
   if (!e.txHash) return cur;
   const decision = decideEvidence({ state: cur.state as State, depositSeen: true });
   if (decision.kind === "none") return cur;
-  const evidence: EvidenceRow = {
-    chain: e.chain,
-    tx_hash: e.txHash,
-    block_ref: e.blockRef,
-    recipient: e.recipient,
-    asset_id: e.assetId,
-    amount: e.amount.toString(),
-    finality: e.finality,
-    tier: e.tier,
-    source: e.source,
-    observed_at: new Date(r.now()).toISOString(),
-    explorer_url: explorerUrl(e.chain, e.txHash),
-    sender: e.sender ?? null,
-    ...(e.chainDetail ? { solana: e.chainDetail.solana ?? null, bitcoin: e.chainDetail.bitcoin ?? null } : {}),
-  };
+  const evidence = evidenceRecord(e as EvidenceInput & { txHash: string }, new Date(r.now()));
   if (decision.to === "held") {
     r.log.error({ execution: cur.id, alert: decision.alert }, "ALERT execution held");
     return applyChange(

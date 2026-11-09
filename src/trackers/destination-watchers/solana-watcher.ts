@@ -13,11 +13,11 @@
  *   starts at its newest signature (a payout can only land after the execution exists).
  */
 
+import { SOLANA_MAINNET } from "@nearpay/spec";
 import { recordPoolHealth } from "../../app/chain-tier.js";
 import type { Rails } from "../../app/context.js";
 import { associatedTokenAddress, solanaDelta, TOKEN_PROGRAM } from "../../domain/chains/solana.js";
 import type { SignatureInfo, SolanaRpc } from "../../infra/clients/solana.js";
-import { SOLANA_MAINNET } from "../../spec-0.4.0.js";
 import { clearCursor, readCursor, writeCursor } from "../cursors.js";
 import { matchCredits } from "../matching.js";
 import type { Credit } from "../near-indexer/parse.js";

@@ -5,8 +5,9 @@
  * fallback, the sandbox evidence adapter (§21.5) and vault event forwarding.
  */
 import { randomBytes, randomUUID } from "node:crypto";
+import { BitcoinEvidence, SolanaEvidence } from "@nearpay/spec";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
-import { EventEnvelope, Execution } from "@nearpay-internal/spec";
+import { EventEnvelope, Execution, VaultEventRecord } from "@nearpay-internal/spec";
 import bs58 from "bs58";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { tierAtCreate } from "../../src/app/chain-tier.js";
@@ -17,7 +18,6 @@ import type { SolanaTx } from "../../src/domain/chains/solana.js";
 import { esploraClient } from "../../src/infra/clients/esplora.js";
 import { neardata } from "../../src/infra/clients/near.js";
 import { solanaRpc } from "../../src/infra/clients/solana.js";
-import { BitcoinEvidence, SolanaEvidence, VaultEventRecord } from "../../src/spec-0.4.0.js";
 import { readCursor, writeCursor } from "../../src/trackers/cursors.js";
 import { bitcoinWatchOnce } from "../../src/trackers/destination-watchers/bitcoin-watcher.js";
 import { solanaWatchOnce } from "../../src/trackers/destination-watchers/solana-watcher.js";

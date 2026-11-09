@@ -1,10 +1,11 @@
 /** Stage 4: chain profiles vs the spec vectors, boot-time tiers, SPL registry binding, vault event rules (§21, §8.6). */
 import { readFileSync } from "node:fs";
+import { parseVaultEventLog } from "@nearpay/spec";
+import { VaultEventRecord, vaultEventDedupeKey } from "@nearpay-internal/spec";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { chainProfiles, ProfileError } from "../../src/domain/token-registry/chain-profiles.js";
 import { contractBinding, registryRows } from "../../src/domain/token-registry/registry.js";
-import { parseVaultEventLog, VaultEventRecord, vaultEventDedupeKey } from "../../src/spec-0.4.0.js";
 import { aggregateUuid, type VaultReceipt, vaultEventsOf } from "../../src/trackers/near-indexer/vault.js";
 import { toKey } from "../../src/verifiers/chains.js";
 import { simTransfers } from "../../src/verifiers/verifier.js";

@@ -1,7 +1,7 @@
 /** Kysely table types (migrations/0001_rails.sql, 0002_stage2.sql, 0003_spec_0_2_1.sql). Numeric columns travel as decimal strings. */
 
+import type { BitcoinEvidence, SolanaEvidence } from "@nearpay/spec";
 import type { ColumnType, KitTables } from "@nearpay-internal/db";
-import type { BitcoinEvidence, SolanaEvidence } from "../../spec-0.4.0.js";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type NullableTimestamp = ColumnType<Date | null, Date | string | null | undefined, Date | string | null>;

@@ -18,15 +18,12 @@ import { sql } from "@nearpay-internal/db";
 import { uuidv7 } from "@nearpay-internal/ids";
 import { EventEnvelope } from "@nearpay-internal/spec";
 import type { Rails, Tx } from "../../app/context.js";
-import {
-  EVENT_JSON_PREFIX,
-  parseVaultEventLog,
-  type VAULT_EVENT_REJECT_REASONS,
-  VAULT_EVENT_STANDARD,
-  VAULT_EVENT_SUBJECT,
-  VAULT_EVENT_VERSION,
-  VaultEventRecord,
-} from "../../spec-0.4.0.js";
+
+/** Catalogue subject of the forwarded events (aggregate `vault_mandate`). */
+const VAULT_EVENT_SUBJECT = "evt.rails.vault.event" as const;
+
+import { EVENT_JSON_PREFIX, parseVaultEventLog, VAULT_EVENT_STANDARD, VAULT_EVENT_VERSION } from "@nearpay/spec";
+import { type VAULT_EVENT_REJECT_REASONS, VaultEventRecord } from "@nearpay-internal/spec";
 
 export type VaultRejectReason = (typeof VAULT_EVENT_REJECT_REASONS)[number];
 
@@ -116,29 +113,37 @@ export function aggregateUuid(id: string): string {
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
 }
 
+/** The `evt.rails.vault.event` envelope of one forwarded event (§8.6 v1.10), validated against the spec. Pure. */
+export function vaultEnvelope(livemode: boolean, rec: VaultEventRecord, id: string, occurredAt: Date) {
+  return EventEnvelope.parse({
+    id,
+    subject: VAULT_EVENT_SUBJECT,
+    occurred_at: occurredAt.toISOString(),
+    account_id: null,
+    livemode,
+    aggregate: { type: "vault_mandate", id: vaultAggregateId(rec), version: rec.block_height },
+    data: { object: VaultEventRecord.parse(rec) },
+  });
+}
+
+/** Aggregate id `<vault_contract>#<mandate_id>`. */
+export const vaultAggregateId = (rec: VaultEventRecord): string =>
+  `${rec.vault_contract}#${rec.event.data[0].mandate_id}`;
+
 /**
  * Writes the outbox row of one forwarded event inside `tx`. Kit `emit` (0.3.1) maps `aggregate.id` through `toUuid`,
  * which only accepts NearPay prefixed ids; the vault aggregate id `<vault>#<mandate_id>` is not one (kit change
  * request), so this writes the same row `emit` would, with the envelope validated against the spec.
  */
 async function emitVaultEvent(tx: Tx, livemode: boolean, rec: VaultEventRecord, id: string): Promise<void> {
-  const aggregateId = `${rec.vault_contract}#${rec.event.data[0].mandate_id}`;
-  const envelope = EventEnvelope.parse({
-    id,
-    subject: VAULT_EVENT_SUBJECT,
-    occurred_at: new Date().toISOString(),
-    account_id: null,
-    livemode,
-    aggregate: { type: "vault_mandate", id: aggregateId, version: rec.block_height },
-    data: { object: VaultEventRecord.parse(rec) },
-  });
+  const envelope = vaultEnvelope(livemode, rec, id, new Date());
   await tx
     .insertInto("outbox")
     .values({
       id: envelope.id,
       subject: envelope.subject,
       aggregate_type: envelope.aggregate.type,
-      aggregate_id: aggregateUuid(aggregateId),
+      aggregate_id: aggregateUuid(envelope.aggregate.id),
       aggregate_version: envelope.aggregate.version,
       account_id: null,
       livemode,

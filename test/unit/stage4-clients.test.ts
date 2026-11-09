@@ -1,4 +1,6 @@
 /** Stage 4 pools and clients (§21.4) with an injected fetch: failover, hedging, 429 back-off, health; sandbox vault feed. */
+
+import { BITCOIN_CONFIRMATION_TIERS } from "@nearpay/spec";
 import { describe, expect, it } from "vitest";
 import type { Rails } from "../../src/app/context.js";
 import type { ExecutionRow } from "../../src/app/views.js";
@@ -11,7 +13,6 @@ import {
   unhealthy,
 } from "../../src/infra/clients/pool.js";
 import { solanaRpc } from "../../src/infra/clients/solana.js";
-import { BITCOIN_CONFIRMATION_TIERS } from "../../src/spec-0.4.0.js";
 import { sandboxVaultReceipts } from "../../src/trackers/near-indexer/indexer.js";
 import { verifyBitcoin } from "../../src/verifiers/chains.js";
 import { specVector } from "../support/vectors.js";

@@ -8,11 +8,11 @@
  * (§8.10 completeness); an address seen for the first time records its current history without nudging.
  */
 
+import { BITCOIN_MAINNET } from "@nearpay/spec";
 import { recordPoolHealth } from "../../app/chain-tier.js";
 import type { Rails } from "../../app/context.js";
 import { normalizeBitcoinAddress, outputsTo } from "../../domain/chains/bitcoin.js";
 import type { Esplora } from "../../infra/clients/esplora.js";
-import { BITCOIN_MAINNET } from "../../spec-0.4.0.js";
 import { clearCursor, readCursor, writeCursor } from "../cursors.js";
 import { NUDGEABLE_STATES, nudge } from "../signals.js";
 
