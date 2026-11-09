@@ -1,15 +1,17 @@
 /**
- * Contract (foundations §16): every Stage-1 rails route is bound (and nothing else); every subject the
+ * Contract (foundations §16): every Stage 1–4 rails route is bound (and nothing else); every subject the
  * catalogue routes to rails is handled; every subject rails produces is emitted; the 1Click wire
  * schemas parse the recorded responses (schema parity with the sandbox, sandbox LLD §7).
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { PUBLIC_ROUTES } from "@nearpay/spec";
+import { Evidence, PUBLIC_ROUTES } from "@nearpay/spec";
 import { unhandledSubjects } from "@nearpay-internal/bus";
 import { unimplementedRoutes } from "@nearpay-internal/service";
 import {
+  ChainProfile,
   CreateExecution,
+  EventEnvelope,
   Execution,
   INTERNAL_ROUTES,
   listEvidence,
@@ -18,22 +20,28 @@ import {
   OneClickStatusResponse,
   SUBJECTS,
   type Subject,
+  VaultEventRecord,
 } from "@nearpay-internal/spec";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { railsRoutes } from "../../src/api/routes.js";
 import { subjectFor } from "../../src/app/ledger.js";
+import { evidenceRecord } from "../../src/app/observations.js";
 import { executionView } from "../../src/app/views.js";
 import { railsHandlers } from "../../src/consumers/handlers.js";
+import { chainProfiles } from "../../src/domain/token-registry/chain-profiles.js";
+import { vaultEnvelope, vaultEventsOf } from "../../src/trackers/near-indexer/vault.js";
 import { fixture } from "../support/fakes.js";
+import { specVector } from "../support/vectors.js";
 
 const ALL = [...PUBLIC_ROUTES, ...INTERNAL_ROUTES];
 
 describe("routes and events", () => {
-  it("binds every Stage 1–3 rails route (internal, public and console ops), and nothing else", () => {
+  it("binds every Stage 1–4 rails route (internal, public and console ops), and nothing else", () => {
     const bindings = railsRoutes({ profiles: { all: () => [] } } as never);
     expect(unimplementedRoutes("rails", ALL, bindings).map((r) => r.id)).toEqual([]);
     expect(bindings.map((b) => b.route.id).sort()).toEqual(
-      ALL.filter((r) => r.service === "rails" && r.stage <= 3)
+      ALL.filter((r) => r.service === "rails" && r.stage <= 4)
         .map((r) => r.id)
         .sort(),
     );
@@ -47,7 +55,7 @@ describe("routes and events", () => {
 
   it("emits every subject rails produces", () => {
     const produced = (Object.keys(SUBJECTS) as Subject[]).filter(
-      (k) => SUBJECTS[k].producer === "rails" && SUBJECTS[k].stage <= 3,
+      (k) => SUBJECTS[k].producer === "rails" && SUBJECTS[k].stage <= 4,
     );
     const emitted = new Set(
       (["awaiting_deposit", "succeeded", "refunded", "failed", "held", "settling"] as const).map((to) =>
@@ -55,6 +63,7 @@ describe("routes and events", () => {
       ),
     );
     emitted.add("evt.rails.ops_action.recorded"); // app/ops.ts reverify
+    emitted.add("evt.rails.vault.event"); // trackers/near-indexer/vault.ts (§8.6)
     expect([...emitted].sort()).toEqual([...produced].sort());
     const files = (dir: string): string[] =>
       readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : [join(dir, f)]));
@@ -149,6 +158,93 @@ describe("Stage 3 contract (spec 0.3.0, lld/rails.md §20)", () => {
     expect(CreateExecution.shape.owner).toBeDefined();
     expect(CreateExecution.shape.x402_binding).toBeDefined();
     expect(listEvidence.query?.shape.owner).toBeDefined();
+  });
+});
+
+describe("Stage 4 contract (spec 0.4.0, lld/rails.md §21, §8.6)", () => {
+  // biome-ignore lint/suspicious/noExplicitAny: vector JSON
+  type Any = any;
+  const V = specVector<Any>("chains-solana-bitcoin.json");
+  const VAULT = specVector<Any>("vault.json");
+
+  it("the Solana and Bitcoin profile views parse as ChainProfile with the Stage 4 fields", () => {
+    const doc = parseYaml(readFileSync(new URL("../../config/chains.yaml", import.meta.url), "utf8"));
+    const profiles = chainProfiles(doc);
+    for (const want of V.chains as Any[]) {
+      const view = ChainProfile.parse(profiles.view(profiles.get(want.chain) as never));
+      expect(view).toMatchObject({
+        chain: want.chain,
+        explorer_address_url: want.explorer_address_url,
+        confirmation_tiers: want.confirmation_tiers,
+      });
+    }
+    for (const p of profiles.all()) expect(() => ChainProfile.parse(profiles.view(p))).not.toThrow();
+  });
+
+  it("the Evidence rails records equals the vector Evidence field for field (Solana and Bitcoin)", () => {
+    const cases = [
+      ...(V.evidence.solana.cases as Any[]).filter((c) => c.evidence),
+      ...(V.evidence.bitcoin.cases as Any[]).filter((c) => c.evidence),
+    ];
+    expect(cases.length).toBeGreaterThanOrEqual(6);
+    for (const c of cases) {
+      const ev = c.evidence;
+      const rec = evidenceRecord(
+        {
+          result: c.result,
+          tier: ev.tier,
+          source: ev.source,
+          chain: ev.chain,
+          txHash: ev.tx_hash,
+          blockRef: ev.block_ref,
+          recipient: ev.recipient,
+          sender: ev.sender,
+          assetId: ev.asset_id,
+          amount: BigInt(ev.amount),
+          finality: ev.finality,
+          chainDetail: { solana: ev.solana, bitcoin: ev.bitcoin },
+        },
+        new Date(ev.observed_at),
+      );
+      expect(rec).toEqual(ev);
+      expect(Evidence.parse(rec)).toEqual(ev);
+    }
+  });
+
+  it("evt.rails.vault.event: the envelope rails writes parses with the catalogue entry", () => {
+    const entry = SUBJECTS["evt.rails.vault.event"];
+    expect(entry.producer).toBe("rails");
+    const vault = "v1.vault.nearpay.near";
+    const { records } = vaultEventsOf(
+      {
+        receiptId: "8RK6Dn9EaLwVb5nN3x9yrZfP6qz5mC8cQbqvYyYz2gHq",
+        txHash: "4bWb9XzwJ2w3F7C2dWbNN1pYxQX7bGk8C5fDf3h1Jq8y",
+        executor: vault,
+        logs: (VAULT.events as Any[]).map((e) => e.log as string),
+        success: true,
+      },
+      {
+        vaultContract: vault,
+        final: true,
+        blockHeight: 140_000_000,
+        blockHash: "4bWb9XzwJ2w3F7C2dWbNN1pYxQX7bGk8C5fDf3h1Jq8y",
+        blockTimestamp: "1794268800000000000",
+      },
+    );
+    expect(records).toHaveLength(VAULT.events.length);
+    for (const [i, rec] of records.entries()) {
+      const env = EventEnvelope.parse(
+        vaultEnvelope(i % 2 === 0, rec, "0190f5d2-6c4e-7a00-8000-0000000000aa", new Date()),
+      );
+      expect(env).toMatchObject({
+        subject: "evt.rails.vault.event",
+        account_id: null,
+        livemode: i % 2 === 0,
+        aggregate: { type: entry.aggregate, id: `${vault}#${rec.event.data[0].mandate_id}`, version: 140_000_000 },
+      });
+      expect(VaultEventRecord.parse(env.data.object)).toEqual(rec);
+      expect(entry.object.parse(env.data.object)).toEqual(rec);
+    }
   });
 });
 

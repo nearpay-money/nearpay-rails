@@ -9,7 +9,9 @@
  * - NEP-141 `ft_transfer` (token contract): `{old_owner_id, new_owner_id, amount, memo?}`.
  * Only successful receipt outcomes count.
  */
+
 import { parseEventLogs } from "@nearpay-internal/intents";
+import type { EvidenceChainDetail } from "../../app/observations.js";
 
 export interface Credit {
   readonly chain: string;
@@ -25,6 +27,8 @@ export interface Credit {
   readonly blockRef: string;
   /** Unique within the transaction (receipt id + event index). */
   readonly logRef: string;
+  /** spec 0.4.0: chain detail for the evidence (Solana watcher). */
+  readonly detail?: EvidenceChainDetail;
 }
 
 export interface ReceiptOutcome {

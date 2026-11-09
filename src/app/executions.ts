@@ -7,6 +7,7 @@
  * `intents_transfer`: no provider; the payer signs two Verifier transfers carrying a binding memo
  * that the indexer attributes (§8.6).
  */
+
 import { createHash } from "node:crypto";
 import { NearAccountId, type RouteBody } from "@nearpay/spec";
 import { destinationKey, getChain, validateAddress } from "@nearpay-internal/chains";
@@ -17,11 +18,11 @@ import type { createExecution as createExecutionRoute, Execution, OneClickQuoteR
 import {
   baseAfterBearer,
   binding as bindingOf,
+  destinationTagSpace,
   executionDeadline,
   feeShareOfAmountIn,
   intentsFee,
   tagCandidates,
-  tagSpace,
 } from "../domain/execution/amounts.js";
 import { checkQuote } from "../domain/execution/integrity.js";
 import { type Caller, decideCreateOwner, type Owner } from "../domain/execution/owner.js";
@@ -37,6 +38,7 @@ import {
 } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
 import { refusalError } from "./access.js";
+import { tierAtCreate } from "./chain-tier.js";
 import type { Rails } from "./context.js";
 import { readKillSwitch } from "./kill-switch.js";
 import { applyChange, emitExecution, lockExecution } from "./ledger.js";
@@ -347,7 +349,8 @@ function ownerValues(b: CreateBody, x: Prepared): { owner: Owner; x402_binding: 
 async function createRouteQuote(r: Rails, b: CreateBody, x: Prepared): Promise<Execution> {
   const lm = b.livemode;
   const provider = (lm ? r.providers.live : r.providers.test) as NonNullable<Rails["providers"]["live"]>;
-  const space = tagSpace(unitValue(pricedToken(x.d), x.policy).usd, x.d.decimals);
+  const destFamily = r.profiles.get(x.d.chain)?.family ?? "";
+  const space = destinationTagSpace(destFamily, unitValue(pricedToken(x.d), x.policy).usd, x.d.decimals);
   const tag = await allocateTag(r, x.id, x.key, x.base, space);
   const feeRecipient = lm ? (r.treasury as string) : r.testTreasury;
   const route = x.route as Exclude<RouteClass, "intents_transfer">;
@@ -449,10 +452,13 @@ async function insertRouteQuote(
 ): Promise<Execution> {
   const now = new Date(r.now());
   const deposit = q.res.quote;
+  // §21.4: the tier this execution is verified with, fixed now (a pool failing later never downgrades it)
+  const verificationTier = await tierAtCreate(r, b.destination.chain);
   try {
     return await r.db.transaction().execute(async (tx) => {
       const values = {
         id: x.id,
+        verification_tier: verificationTier,
         account_id: x.accountId,
         livemode: b.livemode,
         kind: b.kind,

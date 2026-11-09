@@ -119,6 +119,20 @@ const shared = {
   evmRpcUrls_1: rpcList.default(["https://ethereum-rpc.publicnode.com", "https://eth.llamarpc.com"]),
   evmRpcUrls_8453: rpcList.default(["https://mainnet.base.org", "https://base-rpc.publicnode.com"]),
   evmRpcUrls_42161: rpcList.default(["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"]),
+  /**
+   * Stage 4 (§21.4): Solana RPC pool (≥ 2 recommended: the public endpoint + an owner-provided provider). Empty →
+   * Solana is Tier B (provider-attested within `NP_TIER_B_LIMITS`) and its watcher is off.
+   */
+  solanaRpcUrls: rpcList.default(["https://api.mainnet-beta.solana.com"]),
+  /** Stage 4 (§21.4): Bitcoin Esplora pool (keyless). Empty → Bitcoin is Tier B. */
+  bitcoinEsploraUrls: rpcList.default(["https://mempool.space/api", "https://blockstream.info/api"]),
+  /**
+   * Stage 4 (§8.6): the subscription vault account whose `nearpay_vault` events are forwarded to
+   * `evt.rails.vault.event` (e.g. `v1.vault.nearpay.near`). Unset → live vault events are not forwarded.
+   */
+  vaultContract: nearAccount.optional(),
+  /** Stage 4 (§8.6, OQ-T-03): the sandbox vault stand-in account (test-mode vault events). */
+  testVaultContract: nearAccount.default("vault.sandbox.near"),
 };
 
 export const apiShape = { ...shared };

@@ -50,7 +50,9 @@ export async function observationsPage(
   };
 }
 
-const TRACKER_CURSORS = (name: string) => name === "near-indexer" || name === "explorer" || name.startsWith("evm:");
+// Stage 4 (§21.2): the Solana and Bitcoin watcher cursors join the completeness rule
+const TRACKER_CURSORS = (name: string) =>
+  name === "near-indexer" || name === "explorer" || name.startsWith("evm:") || name === "solana" || name === "bitcoin";
 
 /**
  * `owner` (spec 0.3.1) narrows `totals`, `tier_b`, `digest`, `in_flight` and `held_open` to that owner's executions;

@@ -14,6 +14,7 @@
  * provider's destination tx, or the indexer's binding match); a provider status alone never settles a leg.
  * The kill switch blocks new live legs (§8.1 step 0); legs already funded keep being tracked (INV-3).
  */
+
 import { NearAccountId, type RouteBody } from "@nearpay/spec";
 import { destinationKey, validateAddress } from "@nearpay-internal/chains";
 import { toUuid, uuidv7 } from "@nearpay-internal/ids";
@@ -30,6 +31,7 @@ import { nextPollAt } from "../domain/execution/schedule.js";
 import { PricingError, settle, usdMicros } from "../domain/pricing/pricing.js";
 import { routeClass as classify, type RouteClass } from "../domain/token-registry/registry.js";
 import type { RefundRow } from "../infra/db/schema.js";
+import { tierAtCreate } from "./chain-tier.js";
 import type { Rails } from "./context.js";
 import { byKey, flag, pricingApiError, railUnavailable, replay, unsupported } from "./executions.js";
 import { readKillSwitch } from "./kill-switch.js";
@@ -404,11 +406,14 @@ async function insertRouteLeg(
       : null,
   };
   try {
+    // §21.4: the tier this leg is verified with, fixed at create
+    const verificationTier = await tierAtCreate(r, b.recipient.chain);
     return await r.db.transaction().execute(async (tx) => {
       const row = await tx
         .insertInto("executions")
         .values({
           ...baseValues(b, x, now),
+          verification_tier: verificationTier,
           method: "route_quote",
           provider: q.provider,
           provider_status: "PENDING_DEPOSIT",

@@ -10,8 +10,10 @@
 #   finality                evidence rule (evm: `finalized` block tag, near: final, bitcoin: confirmations)
 #   verification_timeout_s  provider SUCCESS → evidence deadline, then `held` (rails §8.8). L2 `finalized`
 #                           follows L1 finality (~15–20 min), so EVM timeouts allow for it.
-#   watcher                 destination watcher (EVM ERC-20 logs) runs for this chain
-#   watch_interval_s        watcher cadence (2 s L2, 12 s L1)
+#   watcher                 destination watcher runs for this chain (EVM ERC-20 logs; Solana signatures; Bitcoin
+#                           Esplora signals)
+#   watch_interval_s        watcher cadence (2 s L2, 12 s L1, 4 s Solana, 60 s Bitcoin)
+#   confirmation_tiers      confirmations by settlement USD value (Bitcoin, §21.1), last tier unbounded
 #   memo_mode               none | required (memo chains are not supported as destinations)
 chains:
   - chain: near:mainnet
@@ -98,24 +100,33 @@ chains:
     verification_timeout_s: 1800
     watcher: false
     memo_mode: none
+  # Stage 4 (§21): Tier A when NP_SOLANA_RPC_URLS is set (else Tier B at boot, alert tier_a_degraded)
   - chain: solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp
     blockchain: sol
-    tier: B
+    tier: A
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: "solana: finalized commitment"
     verification_timeout_s: 1800
-    watcher: false
+    watcher: true
+    watch_interval_s: 4
     memo_mode: none
+  # Stage 4 (§21): Tier A when NP_BITCOIN_ESPLORA_URLS is set; the watcher only nudges the poller (BTC is untagged)
   - chain: bip122:000000000019d6689c085ae165831e93
     blockchain: btc
-    tier: B
+    tier: A
     min_deadline_s: 3600
     default_deadline_s: 7200
-    finality: 1 confirmation < USD 1k, else 2
+    finality: "bitcoin: 1 confirmation below USD 1,000, else 2"
     verification_timeout_s: 7200
-    watcher: false
+    watcher: true
+    watch_interval_s: 60
     memo_mode: none
+    confirmation_tiers:
+      - below_usd_micros: 1000000000
+        confirmations: 1
+      - below_usd_micros: null
+        confirmations: 2
   - chain: bip122:12a765e31ffd4059bada1e25190f6e98
     blockchain: ltc
     tier: B

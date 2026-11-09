@@ -24,6 +24,15 @@ export function tagSpace(unitUsd: Rational, decimals: number): number {
   return capped < 100 ? 0 : capped;
 }
 
+/**
+ * Tag space of a destination (§8.3, §21.1): Bitcoin settlements are **never** tagged whatever the BTC price (owner
+ * decision; Bitcoin evidence comes only from the verifier on the provider's txid), so the requested amount never
+ * carries a tag there even if a low price would give ≥ 100 slots. Other families follow `tagSpace`.
+ */
+export function destinationTagSpace(family: string, unitUsd: Rational, decimals: number): number {
+  return family === "bitcoin" ? 0 : tagSpace(unitUsd, decimals);
+}
+
 /** Candidate tags in allocation order: up to 5 random draws, then every tag ascending (§8.3). */
 export function tagCandidates(space: number, random: () => number): number[] {
   if (space <= 0) return [];

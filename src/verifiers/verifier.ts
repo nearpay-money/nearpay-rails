@@ -12,10 +12,13 @@
  * - Tier B chains: the provider's word within `NP_TIER_B_LIMITS`.
  * Not final / not found → retried every 10 s until `verification_timeout_s` → `held`.
  */
+
 import { sql } from "@nearpay-internal/db";
 import { parseEventLogs } from "@nearpay-internal/intents";
+import { verificationTier } from "../app/chain-tier.js";
 import type { Rails } from "../app/context.js";
 import { applyChange, lockExecution } from "../app/ledger.js";
+import type { EvidenceChainDetail } from "../app/observations.js";
 import { applyEvidence, type EvidenceInput } from "../app/observations.js";
 import { policyFor } from "../app/pricing.js";
 import { tokenOf } from "../app/tokens.js";
@@ -28,13 +31,20 @@ import {
   tierBAllowed,
   type VerificationResult,
 } from "../domain/verification/verification.js";
+import type { Esplora } from "../infra/clients/esplora.js";
 import { type EvmRpc, erc20Transfers } from "../infra/clients/evm.js";
 import type { NearRpc } from "../infra/clients/near.js";
+import type { SolanaRpc } from "../infra/clients/solana.js";
 import { outcomeSucceeded, senderOf } from "../trackers/near-indexer/parse.js";
+import { sandboxChainOutcome, toKey, verifyBitcoin, verifySolana } from "./chains.js";
 
 export interface VerifierDeps {
   readonly near: NearRpc | null;
   readonly evm: ReadonlyMap<string, EvmRpc>;
+  /** Stage 4 (§21.4): null/absent when `NP_SOLANA_RPC_URLS` is empty (Solana is then Tier B at boot). */
+  readonly solana?: SolanaRpc | null;
+  /** Stage 4 (§21.4): null/absent when `NP_BITCOIN_ESPLORA_URLS` is empty. */
+  readonly esplora?: Esplora | null;
 }
 
 export interface VerifyOutcome {
@@ -50,6 +60,8 @@ export interface VerifyOutcome {
   readonly details: Record<string, unknown>;
   /** Hold at once (no point retrying). */
   readonly holdNow?: HeldReason;
+  /** spec 0.4.0: `Evidence.solana` / `Evidence.bitcoin`. */
+  readonly chainDetail?: EvidenceChainDetail;
 }
 
 const RETRY_MS = 10_000;
@@ -243,10 +255,17 @@ async function verifyNear(
  */
 export function simTransfers(
   transfers: readonly { token: string; from?: string | null | undefined; to: string; amount: string }[],
+  chain = "near:mainnet",
 ) {
+  // Solana addresses are case-sensitive base58 (Stage 4): only the other families compare lower-case
+  const solana = chain.startsWith("solana:");
   return transfers.map((t) => ({
-    to: t.to.toLowerCase(),
-    from: senderOf(t.from),
+    to: toKey(chain, t.to),
+    from: solana
+      ? typeof t.from === "string" && t.from.length > 0 && t.from.length <= 64
+        ? t.from
+        : null
+      : senderOf(t.from),
     assetId: t.token,
     amount: BigInt(t.amount),
   }));
@@ -264,11 +283,31 @@ async function verifySandbox(r: Rails, row: ExecutionRow, hashes: readonly strin
       best ??= { ...pending({ hash, reason: "unknown simulated tx" }), result: "not_found" };
       continue;
     }
+    const family = r.profiles.get(row.destination_chain)?.family;
+    if (family === "solana" && !tx.finalized) {
+      best = pending({ hash, reason: "simulated tx not finalized" });
+      continue;
+    }
+    if (family === "solana" || family === "bitcoin") {
+      // §21.5: confirmations (Bitcoin) and the failed flag (Solana) decide, then the Stage 4 evidence detail
+      const out = await sandboxChainOutcome(
+        r,
+        row,
+        family,
+        hash,
+        tx,
+        simTransfers(tx.transfers, row.destination_chain),
+        r.profiles.get(row.destination_chain)?.confirmationTiers ?? [],
+      );
+      if (out.result === "pass" || out.result === "short") return out;
+      best = out.result === "pending" || best === null ? out : best;
+      continue;
+    }
     if (!tx.finalized) {
       best = pending({ hash, reason: "simulated tx not final" });
       continue;
     }
-    const transfers = simTransfers(tx.transfers);
+    const transfers = simTransfers(tx.transfers, row.destination_chain);
     const c = compareTransfers(transfers, { recipient, assetId: row.destination_asset_id, expected });
     const out: VerifyOutcome = {
       result: c.result,
@@ -335,7 +374,8 @@ export async function verifyExecution(r: Rails, deps: VerifierDeps, row: Executi
   const profile = r.profiles.get(row.destination_chain);
   if (!profile) return { ...pending({ reason: "chain has no profile" }), holdNow: "evidence_timeout" };
   const hashes = row.destination_tx_hashes;
-  if (profile.tier === "B") return tierB(r, row, {});
+  // §21.4: the tier the execution was created with (pinned since 0005), not today's profile
+  if (verificationTier(r, row) === "B") return tierB(r, row, {});
   if (!row.livemode) return verifySandbox(r, row, hashes);
   if (hashes.length === 0) return pending({ reason: "no destination transactions yet" });
   if (profile.family === "evm") {
@@ -347,7 +387,17 @@ export async function verifyExecution(r: Rails, deps: VerifierDeps, row: Executi
     if (!deps.near) return pending({ reason: "no NEAR RPC" });
     return verifyNear(r, deps.near, row, hashes);
   }
-  return tierB(r, row, { reason: "no Tier A verifier for this chain family in Stage 1" });
+  const agreement = () => needsAgreement(r, row);
+  if (profile.family === "solana") {
+    // a Tier-A execution whose pool is gone is retried until its timeout, then held — never downgraded (§21.4)
+    if (!deps.solana) return pending({ reason: "no Solana RPC pool" });
+    return verifySolana(r, deps.solana, row, hashes, agreement);
+  }
+  if (profile.family === "bitcoin") {
+    if (!deps.esplora) return pending({ reason: "no Bitcoin Esplora pool" });
+    return verifyBitcoin(r, deps.esplora, row, hashes, profile.confirmationTiers ?? [], agreement);
+  }
+  return tierB(r, row, { reason: "no Tier A verifier for this chain family" });
 }
 
 /** Claims executions due for verification (`verify_at` ≤ now) with a lease. */
@@ -401,6 +451,7 @@ export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20): Prom
         amount: v.amount,
         finality: v.finality,
         details: v.details,
+        ...(v.chainDetail ? { chainDetail: v.chainDetail } : {}),
       });
       if (after.state === "succeeded") return;
       if (after.state === "held") {

@@ -1,4 +1,6 @@
 /** Kysely table types (migrations/0001_rails.sql, 0002_stage2.sql, 0003_spec_0_2_1.sql). Numeric columns travel as decimal strings. */
+
+import type { BitcoinEvidence, SolanaEvidence } from "@nearpay/spec";
 import type { ColumnType, KitTables } from "@nearpay-internal/db";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -130,6 +132,9 @@ export type EvidenceRow = {
   explorer_url: string | null;
   /** spec 0.3.0: the account that sent the settlement transfer, as the detector saw it (null = unknown). */
   sender?: string | null;
+  /** spec 0.4.0 (§21.3): Solana / Bitcoin settlement detail (null/absent on other chains). */
+  solana?: SolanaEvidence | null;
+  bitcoin?: BitcoinEvidence | null;
 };
 
 export interface ExecutionsTable {
@@ -209,6 +214,8 @@ export interface ExecutionsTable {
   abandoned_at: NullableTimestamp;
   abandon_reason: Opt<string>;
   abandon_note: Opt<string>;
+  // Stage 4 (0005, §21.4): the tier the execution was created with
+  verification_tier: Opt<"A" | "B">;
 }
 
 export interface AmountTagsTable {
@@ -312,6 +319,21 @@ export interface DestinationMinimumsTable {
   computed_at: NullableTimestamp;
 }
 
+/** Stage 4 (0005, §8.6): forwarded vault events (dedupe `receipt_id:log_index`). */
+export interface VaultEventsTable {
+  livemode: boolean;
+  receipt_id: string;
+  log_index: number;
+  vault_contract: string;
+  tx_hash: string;
+  block_height: ColumnType<string, number | string, number | string>;
+  block_hash: string;
+  event: string;
+  mandate_id: ColumnType<string, number | string, number | string>;
+  outbox_event_id: string;
+  forwarded_at: Timestamp;
+}
+
 export interface RailsTables {
   tokens: TokensTable;
   fx_rates: FxRatesTable;
@@ -325,6 +347,7 @@ export interface RailsTables {
   cursors: CursorsTable;
   control_flags: ControlFlagsTable;
   destination_minimums: DestinationMinimumsTable;
+  vault_events: VaultEventsTable;
 }
 
 export type DB = RailsTables & KitTables;

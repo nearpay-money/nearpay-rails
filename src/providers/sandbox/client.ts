@@ -4,15 +4,18 @@
  * using the 1Click construction, so the same SDK call verifies them with `NP_SANDBOX_SIGNING_PUBKEY`.
  * Also the simulated chains and Verifier feed the sandbox verifier and sandbox feed read.
  */
+
 import { verifyQuoteSignature } from "@defuse-protocol/one-click-sdk-typescript";
 import { httpClient } from "@nearpay-internal/http";
 import {
   type OneClickQuoteRequest,
   type OneClickQuoteResponse,
+  type SimTx,
   sandboxGetTx,
   sandboxIntentsEvents,
 } from "@nearpay-internal/spec";
 import bs58 from "bs58";
+import type { z } from "zod";
 import { oneClickCalls, textFetch } from "../oneclick/client.js";
 import { assertMode, type RouteProvider, type Scenario } from "../port.js";
 
@@ -33,20 +36,8 @@ export interface SandboxOptions {
 }
 
 export interface SandboxChains {
-  tx(
-    chain: string,
-    hash: string,
-  ): Promise<{
-    finalized: boolean;
-    transfers: { token: string; from?: string | null | undefined; to: string; amount: string }[];
-  } | null>;
-  events(
-    cursor: number,
-    limit: number,
-  ): Promise<{
-    events: { seq: number; tx_hash: string; block_height: number; log: string }[];
-    next_cursor: number;
-  }>;
+  tx(chain: string, hash: string): Promise<z.output<typeof SimTx> | null>;
+  events(cursor: number, limit: number): Promise<z.output<typeof sandboxIntentsEvents.response>>;
 }
 
 export function sandboxProvider(o: SandboxOptions): RouteProvider & { chains: SandboxChains } {
