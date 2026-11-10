@@ -9,7 +9,7 @@ import { BitcoinEvidence, SolanaEvidence } from "@nearpay/spec";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { EventEnvelope, Execution, VaultEventRecord } from "@nearpay-internal/spec";
 import bs58 from "bs58";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { tierAtCreate } from "../../src/app/chain-tier.js";
 import { refreshTokens } from "../../src/app/tokens.js";
 import type { ExecutionRow } from "../../src/app/views.js";
@@ -54,7 +54,15 @@ const txid = () => randomBytes(32).toString("hex");
 // fakes
 // ---------------------------------------------------------------------------------------------
 
+/** Transactions the fake serves at `confirmed` (evidence, ADR-0022 as amended). */
 const solTxs = new Map<string, SolanaTx | null>();
+/**
+ * `finalized` view (§8.12 re-check): a confirmed tx whose slot ≤ `solFinalizedSlot`, unless `solFinal` overrides it
+ * (null = dropped with its fork, or another tx = moved).
+ */
+const solFinal = new Map<string, SolanaTx | null>();
+let solFinalizedSlot = 0;
+const commitments: string[] = [];
 /** account → signatures, newest first. */
 const solSigs = new Map<string, { signature: string; slot: number; err: unknown; blockTime: number }[]>();
 
@@ -62,12 +70,21 @@ async function fakeSolana(): Promise<FakeServer> {
   return fakeServer((req) => {
     const b = req.body as { method: string; params: [string, Record<string, unknown>] };
     const reply = (result: unknown) => ({ status: 200, body: { jsonrpc: "2.0", id: 1, result } });
+    if (b.method === "getSlot") return reply(solFinalizedSlot);
     if (b.method === "getTransaction") {
-      expect(b.params[1]).toMatchObject({ commitment: "finalized", maxSupportedTransactionVersion: 0 });
+      expect(b.params[1]).toMatchObject({ maxSupportedTransactionVersion: 0 });
+      const c = b.params[1].commitment as string;
+      commitments.push(`getTransaction@${c}`);
+      expect(["confirmed", "finalized"]).toContain(c); // never `processed`
+      if (c === "finalized") {
+        if (solFinal.has(b.params[0])) return reply(solFinal.get(b.params[0]) ?? null);
+        const t = solTxs.get(b.params[0]) ?? null;
+        return reply(t && t.slot <= solFinalizedSlot ? t : null);
+      }
       return reply(solTxs.get(b.params[0]) ?? null);
     }
     if (b.method === "getSignaturesForAddress") {
-      expect(b.params[1]).toMatchObject({ commitment: "finalized" });
+      expect(b.params[1]).toMatchObject({ commitment: "confirmed" });
       const all = solSigs.get(b.params[0]) ?? [];
       const until = b.params[1].until as string | undefined;
       const cut = until ? all.findIndex((x) => x.signature === until) : -1;
@@ -265,7 +282,7 @@ describe("Solana verifier (§21.3)", () => {
       recipient: OWNER,
       asset_id: USDC_SOL,
       amount: "25000000",
-      finality: "finalized",
+      finality: "confirmed", // ADR-0022 as amended: `confirmed` commitment (Solana's one-block confirmation)
       tier: "A",
       source: "verifier",
       sender: SOLVER,
@@ -282,6 +299,104 @@ describe("Solana verifier (§21.3)", () => {
       token_accounts: [OWNER_ATA],
       pre_amount: "0",
       post_amount: "25000000",
+    });
+    expect(commitments).toContain("getTransaction@confirmed");
+    expect(commitments).not.toContain("getTransaction@finalized"); // evidence never waits for `finalized`
+  });
+
+  describe("post-success re-check at `finalized` commitment (§8.12)", () => {
+    const recheck = (id: string) =>
+      s.admin.db
+        .selectFrom("executions")
+        .select([
+          "state",
+          "version",
+          "finality_recheck_status",
+          "finality_recheck_detail",
+          "finality_recheck_block_hash",
+        ])
+        .where("id", "=", toUuid(id, "ex"))
+        .executeTakeFirstOrThrow();
+    const due = (id: string) =>
+      s.admin.db
+        .updateTable("executions")
+        .set({ finality_recheck_at: new Date() })
+        .where("id", "=", toUuid(id, "ex"))
+        .execute();
+    async function settled(slot: number) {
+      const signature = sig();
+      solTxs.set(signature, splPayout({ signature, slot, amount: 4_000_000n }));
+      const id = await insertExecution({
+        state: "verifying",
+        chain: SOLANA,
+        recipient: OWNER,
+        asset: USDC_SOL,
+        decimals: 6,
+        base: 4_000_000n,
+        txHashes: [signature],
+      });
+      await until(id, (e) => e.state === "succeeded");
+      return { id, signature };
+    }
+    async function outcome(id: string) {
+      const end = Date.now() + 10_000;
+      for (;;) {
+        const r = await recheck(id);
+        if (r.finality_recheck_status !== "pending" || Date.now() > end) return r;
+        await new Promise((x) => setTimeout(x, 100));
+      }
+    }
+
+    it("scheduled at settlement; pending until the slot is finalized, then `finalized`", async () => {
+      solFinalizedSlot = 0;
+      const { id } = await settled(380_100_000);
+      expect(await recheck(id)).toMatchObject({
+        finality_recheck_status: "pending",
+        finality_recheck_block_hash: null,
+      });
+      expect((await recheck(id)).finality_recheck_detail).toMatchObject({ family: "solana", block_ref: "380100000" });
+      await due(id);
+      await new Promise((r) => setTimeout(r, 600));
+      expect((await recheck(id)).finality_recheck_status).toBe("pending"); // slot not finalized yet
+      solFinalizedSlot = 380_100_032;
+      await due(id);
+      expect(await outcome(id)).toMatchObject({ state: "succeeded", finality_recheck_status: "finalized" });
+    });
+
+    it("dropped with its fork by finality → ALERT, metric, evidence-trail observation; stays succeeded", async () => {
+      const tr = s.tracker?.rails as NonNullable<typeof s.tracker>["rails"];
+      const alert = vi.spyOn(tr.log, "error");
+      const metric = vi.spyOn(tr.metrics, "finalityRecheck");
+      solFinalizedSlot = 0;
+      const { id, signature } = await settled(380_200_000);
+      solTxs.set(signature, null); // gone at `confirmed` too: the fork was abandoned
+      solFinal.set(signature, null);
+      solFinalizedSlot = 380_200_040;
+      await due(id);
+      const row = await outcome(id);
+      expect(row).toMatchObject({ state: "succeeded", version: 2, finality_recheck_status: "failed" });
+      expect(row.finality_recheck_detail).toMatchObject({
+        outcome: "failed",
+        family: "solana",
+        reason: "transaction not found at finality",
+      });
+      expect(metric).toHaveBeenCalledWith(SOLANA, "failed");
+      expect(alert).toHaveBeenCalledWith(
+        expect.objectContaining({ tx_hash: signature }),
+        expect.stringMatching(/^ALERT finalized re-check failed: confirmed Solana evidence/),
+      );
+      const obs = await s.call("GET", `/internal/executions/${id}/observations`);
+      expect((obs.body as { data: Any[] }).data).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: "verifier",
+            applied: false,
+            payload: expect.objectContaining({ finality_recheck: expect.objectContaining({ outcome: "failed" }) }),
+          }),
+        ]),
+      );
+      alert.mockRestore();
+      metric.mockRestore();
     });
   });
 
@@ -311,7 +426,7 @@ describe("Solana verifier (§21.3)", () => {
     expect(done.evidence?.tx_hash).toBe(good);
   });
 
-  it("not yet finalized (null) keeps verifying; the verification timeout holds it (evidence_timeout)", async () => {
+  it("not yet confirmed (null) keeps verifying; the verification timeout holds it (evidence_timeout)", async () => {
     const pendingSig = sig();
     const id = await insertExecution({
       state: "verifying",
@@ -398,7 +513,7 @@ describe("Bitcoin verifier (§21.3, confirmation tiers)", () => {
     });
   });
 
-  it("USD 1,000: one confirmation is not final, the second settles; the mempool never counts", async () => {
+  it("USD 1,000 (and any amount): one confirmation settles — no USD tiers by default; the mempool never counts", async () => {
     const tx = { ...vec(1), txid: txid(), status: { confirmed: false } } as EsploraTx;
     btcTxs.set(tx.txid, tx);
     tip = 900_000;
@@ -420,19 +535,11 @@ describe("Bitcoin verifier (§21.3, confirmation tiers)", () => {
       .set({ verify_at: new Date() })
       .where("id", "=", toUuid(id, "ex"))
       .execute();
-    await new Promise((r) => setTimeout(r, 700));
-    expect((await get(id)).state).toBe("verifying"); // 1 of 2 confirmations
-    tip = 900_001;
-    await s.admin.db
-      .updateTable("executions")
-      .set({ verify_at: new Date() })
-      .where("id", "=", toUuid(id, "ex"))
-      .execute();
     const done = await until(id, (e) => e.state === "succeeded");
-    expect((done.evidence as Any).bitcoin).toMatchObject({ confirmations: 2, required_confirmations: 2 });
+    expect((done.evidence as Any).bitcoin).toMatchObject({ confirmations: 1, required_confirmations: 1 });
   });
 
-  it("without a price in the snapshot the strictest tier applies (fail closed)", async () => {
+  it("without a price in the snapshot: still 1 confirmation (no tiers to be strict about)", async () => {
     const tx = { ...vec(0), txid: txid() } as EsploraTx;
     btcTxs.set(tx.txid, tx);
     tip = 900_000;
@@ -446,15 +553,79 @@ describe("Bitcoin verifier (§21.3, confirmation tiers)", () => {
       txHashes: [tx.txid],
       snapshot: { primary_usd: null, secondary_usd: null },
     });
-    await new Promise((r) => setTimeout(r, 700));
-    expect((await get(id)).state).toBe("verifying");
-    tip = 900_001;
-    await s.admin.db
-      .updateTable("executions")
-      .set({ verify_at: new Date() })
-      .where("id", "=", toUuid(id, "ex"))
-      .execute();
-    expect(((await until(id, (e) => e.state === "succeeded")).evidence as Any).bitcoin.required_confirmations).toBe(2);
+    expect(((await until(id, (e) => e.state === "succeeded")).evidence as Any).bitcoin.required_confirmations).toBe(1);
+  });
+
+  describe("post-success re-check at 6 confirmations in the same block (§8.12)", () => {
+    const recheck = (id: string) =>
+      s.admin.db
+        .selectFrom("executions")
+        .select(["state", "finality_recheck_status", "finality_recheck_detail", "finality_recheck_block_hash"])
+        .where("id", "=", toUuid(id, "ex"))
+        .executeTakeFirstOrThrow();
+    const due = (id: string) =>
+      s.admin.db
+        .updateTable("executions")
+        .set({ finality_recheck_at: new Date() })
+        .where("id", "=", toUuid(id, "ex"))
+        .execute();
+    async function outcome(id: string) {
+      const end = Date.now() + 10_000;
+      for (;;) {
+        const r = await recheck(id);
+        if (r.finality_recheck_status !== "pending" || Date.now() > end) return r;
+        await new Promise((x) => setTimeout(x, 100));
+      }
+    }
+    async function settled() {
+      const tx = { ...vec(3), txid: txid() } as EsploraTx;
+      btcTxs.set(tx.txid, tx);
+      tip = 900_000;
+      const id = await insertExecution({
+        state: "verifying",
+        chain: BITCOIN,
+        recipient: BTC_ADDR,
+        asset: BTC,
+        decimals: 8,
+        base: 625_000n,
+        txHashes: [tx.txid],
+        snapshot: { primary_usd: "80000", secondary_usd: null },
+      });
+      await until(id, (e) => e.state === "succeeded");
+      return { id, tx };
+    }
+
+    it("pending below 6 confirmations; same block hash at 6 → finalized", async () => {
+      const { id, tx } = await settled();
+      expect(await recheck(id)).toMatchObject({
+        finality_recheck_status: "pending",
+        finality_recheck_block_hash: tx.status.block_hash,
+      });
+      tip = 900_004; // 5 confirmations
+      await due(id);
+      await new Promise((r) => setTimeout(r, 600));
+      expect((await recheck(id)).finality_recheck_status).toBe("pending");
+      tip = 900_005; // 6 confirmations
+      await due(id);
+      expect(await outcome(id)).toMatchObject({ state: "succeeded", finality_recheck_status: "finalized" });
+    });
+
+    it("orphaned (re-mined in another block) by 6 confirmations → failed alert; the payment stays succeeded", async () => {
+      const tr = s.tracker?.rails as NonNullable<typeof s.tracker>["rails"];
+      const metric = vi.spyOn(tr.metrics, "finalityRecheck");
+      const { id, tx } = await settled();
+      btcTxs.set(tx.txid, { ...tx, status: { confirmed: true, block_height: 900_001, block_hash: "cd".repeat(32) } });
+      tip = 900_010;
+      await due(id);
+      const row = await outcome(id);
+      expect(row).toMatchObject({ state: "succeeded", finality_recheck_status: "failed" });
+      expect(row.finality_recheck_detail).toMatchObject({
+        family: "bitcoin",
+        reason: "block hash changed by 6 confirmations",
+      });
+      expect(metric).toHaveBeenCalledWith(BITCOIN, "failed");
+      metric.mockRestore();
+    });
   });
 });
 
@@ -527,8 +698,12 @@ describe("tiers (§21.4)", () => {
     expect(p.find((x) => x.chain === BITCOIN)).toMatchObject({
       tier: "A",
       explorer_address_url: "https://mempool.space/address/{address}",
-      confirmation_tiers: V.chains[1].confirmation_tiers,
+      // ADR-0022 as amended: 1 confirmation for every amount (the spec 0.4.0 vector still lists the USD tiers)
+      finality: "bitcoin: 1 confirmation",
+      confirmation_tiers: [{ below_usd_micros: null, confirmations: 1 }],
     });
+    expect(p.find((x) => x.chain === SOLANA)).toMatchObject({ finality: "solana: confirmed commitment" });
+    for (const x of p.filter((y) => y.family === "evm")) expect(x.finality).toBe("1 confirmation");
   });
 });
 
@@ -537,7 +712,7 @@ describe("tiers (§21.4)", () => {
 // ---------------------------------------------------------------------------------------------
 
 describe("Solana watcher (§21.2)", () => {
-  it("attributes a finalized payout to the tagged execution by exact amount (failed txs skipped); nudges deposits", async () => {
+  it("attributes a confirmed payout to the tagged execution by exact amount (failed txs skipped); nudges deposits", async () => {
     const owner = "EyjEeiTxb4rvkoN3ZA2zTimuc6VyF8V1QuH9TT66Gkn6";
     const { associatedTokenAddress } = await import("../../src/domain/chains/solana.js");
     const ata = associatedTokenAddress(owner, MINT).address;
@@ -603,7 +778,22 @@ describe("Solana watcher (§21.2)", () => {
     expect(res.settled).toBe(1);
     const done = await get(id);
     expect(done.state).toBe("succeeded");
-    expect(done.evidence).toMatchObject({ source: "watcher", tx_hash: paid, amount: "10004321", sender: SOLVER });
+    expect(done.evidence).toMatchObject({
+      source: "watcher",
+      tx_hash: paid,
+      amount: "10004321",
+      sender: SOLVER,
+      finality: "confirmed",
+    });
+    expect(
+      (
+        await s.admin.db
+          .selectFrom("executions")
+          .select("finality_recheck_status")
+          .where("id", "=", toUuid(id, "ex"))
+          .executeTakeFirstOrThrow()
+      ).finality_recheck_status,
+    ).toBe("pending"); // watcher evidence is re-checked at `finalized` too
     expect((done.evidence as Any).solana).toMatchObject({ owner, mint: MINT, token_accounts: [ata], slot: 12 });
     // the failed tx was never fetched for attribution
     expect(sol.requests.some((r) => (r.body as Any)?.params?.[0] === failed)).toBe(false);
@@ -669,6 +859,49 @@ describe("Bitcoin watcher (§21.2, signal only)", () => {
       .executeTakeFirstOrThrow();
     expect(row).toEqual({ has_signal: true, state: "settling" }); // never evidence by itself
     expect(await readCursor(s.rails, "bitcoin")).not.toBeNull();
+  });
+
+  it("a verifying execution: a newly confirmed tx to its destination makes its verification due now", async () => {
+    const addr = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+    const id = await insertExecution({
+      state: "verifying",
+      chain: BITCOIN,
+      recipient: addr,
+      asset: BTC,
+      decimals: 8,
+      base: 100_000n,
+      txHashes: ["ee".repeat(32)], // unknown to the fake: the verifier keeps retrying
+    });
+    const later = new Date(Date.now() + 60_000);
+    const park = () =>
+      s.admin.db.updateTable("executions").set({ verify_at: later }).where("id", "=", toUuid(id, "ex")).execute();
+    const { addressToScript } = await import("../../src/domain/chains/bitcoin.js");
+    const script = addressToScript(addr) as string;
+    const pay = (): EsploraTx => ({
+      txid: txid(),
+      vout: [{ scriptpubkey: script, value: 100_000 }],
+      status: { confirmed: true, block_height: 900_200, block_hash: "ef".repeat(32) },
+    });
+    const esplora = esploraClient({ urls: [esp.url] });
+    btcAddr.set(addr, []);
+    await park();
+    expect((await bitcoinWatchOnce(s.rails, esplora)).verified).toBe(0); // first sight records history
+    btcAddr.set(addr, [pay()]);
+    await park();
+    const res = await bitcoinWatchOnce(s.rails, esplora);
+    expect(res).toMatchObject({ nudged: 0, verified: 1 });
+    const row = await s.admin.db
+      .selectFrom("executions")
+      .select(["verify_at", "state"])
+      .where("id", "=", toUuid(id, "ex"))
+      .executeTakeFirstOrThrow();
+    expect(row.state).toBe("verifying"); // scheduling only
+    expect((row.verify_at as Date).getTime()).toBeLessThan(later.getTime());
+    await s.admin.db
+      .updateTable("executions")
+      .set({ state: "failed", terminal_at: new Date(), verify_at: null })
+      .where("id", "=", toUuid(id, "ex"))
+      .execute();
   });
 });
 
@@ -741,7 +974,7 @@ describe("sandbox evidence adapter (§21.5)", () => {
     };
     const tr = [{ to: OWNER, assetId: USDC_SOL, amount: 25_000_000n, from: SOLVER }];
     const ok = await sandboxChainOutcome(s.rails, row, "solana", hash, tx, tr, []);
-    expect(ok).toMatchObject({ result: "pass", sender: SOLVER, blockRef: "1234", finality: "finalized" });
+    expect(ok).toMatchObject({ result: "pass", sender: SOLVER, blockRef: "1234", finality: "confirmed" });
     expect(ok.chainDetail?.solana).toEqual({
       signature: hash,
       slot: 1234,

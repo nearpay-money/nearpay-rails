@@ -1,11 +1,13 @@
 /**
- * Bitcoin watcher (lld/rails.md §21.2), leader-elected in `rails-feeds`, every 60 s, demand-driven, SIGNAL ONLY:
+ * Bitcoin watcher (lld/rails.md §21.2), leader-elected in `rails-feeds`, every 30 s, demand-driven, SIGNAL ONLY:
  * Bitcoin is never amount-tagged (§21.1), so a transfer seen here is never evidence by itself. For each destination
  * address of an in-flight live execution, and each deposit address still awaiting its deposit, Esplora
  * `GET /address/{addr}/txs`; a newly CONFIRMED transaction with an output paying the address (re-derived from the
  * scriptPubKey; split outputs count) nudges the hot poller, whose provider status then carries the destination txid
- * for the verifier (§21.3). Mempool transactions are not counted. Seen txids live in the `bitcoin` cursor row
- * (§8.10 completeness); an address seen for the first time records its current history without nudging.
+ * for the verifier (§21.3) — or, when the execution is already the verifier's (`verifying` / `held`), makes its next
+ * verification due now (ADR-0022 as amended: 1 confirmation settles, so the block that confirms it should be read at
+ * once). Mempool transactions are not counted. Seen txids live in the `bitcoin` cursor row (§8.10 completeness); an
+ * address seen for the first time records its current history without nudging.
  */
 
 import { BITCOIN_MAINNET } from "@nearpay/spec";
@@ -14,7 +16,7 @@ import type { Rails } from "../../app/context.js";
 import { normalizeBitcoinAddress, outputsTo } from "../../domain/chains/bitcoin.js";
 import type { Esplora } from "../../infra/clients/esplora.js";
 import { clearCursor, readCursor, writeCursor } from "../cursors.js";
-import { NUDGEABLE_STATES, nudge } from "../signals.js";
+import { NUDGEABLE_STATES, nudge, VERIFIABLE_STATES, verifyNow } from "../signals.js";
 
 export const BITCOIN_CURSOR = "bitcoin";
 const KEEP = 60;
@@ -33,7 +35,7 @@ export async function bitcoinDemand(r: Rails, chain = BITCOIN_MAINNET): Promise<
     .where("destination_chain", "=", chain)
     .where("recipient_type", "=", "destination_chain")
     .where("terminal_at", "is", null)
-    .where("state", "in", [...NUDGEABLE_STATES])
+    .where("state", "in", [...NUDGEABLE_STATES, ...VERIFIABLE_STATES])
     .execute();
   const dep = await r.db
     .selectFrom("executions")
@@ -58,11 +60,11 @@ export async function bitcoinWatchOnce(
   r: Rails,
   esplora: Esplora,
   chain = BITCOIN_MAINNET,
-): Promise<{ addresses: number; nudged: number }> {
+): Promise<{ addresses: number; nudged: number; verified: number }> {
   const demand = await bitcoinDemand(r, chain);
   if (demand.size === 0) {
     await clearCursor(r, BITCOIN_CURSOR);
-    return { addresses: 0, nudged: 0 };
+    return { addresses: 0, nudged: 0, verified: 0 };
   }
   const prev = (await readCursor<CursorValue>(r, BITCOIN_CURSOR))?.seen ?? {};
   const next: Record<string, string[]> = {};
@@ -82,7 +84,9 @@ export async function bitcoinWatchOnce(
   } finally {
     await recordPoolHealth(r, chain, esplora.health()).catch(() => {});
   }
+  // each helper only touches executions in its own states (poller-owned vs verifier-owned)
   const nudged = await nudge(r, toNudge);
+  const verified = await verifyNow(r, toNudge);
   await writeCursor(r, BITCOIN_CURSOR, { seen: next } satisfies CursorValue);
-  return { addresses: demand.size, nudged };
+  return { addresses: demand.size, nudged, verified };
 }

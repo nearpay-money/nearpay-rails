@@ -3,9 +3,11 @@
  *
  * - `finalized`: evidence counts once the transfer's block is at or below the chain's `finalized` tag (Ethereum L1;
  *   on an L2 this follows L1 finality, ≈ 15–20 min).
- * - `confirmations`: evidence counts once `latest − block + 1 ≥ blocks` on the chain itself (L2 block confirmations,
- *   owner decision 2026-11-10 for Base and Arbitrum). The receipt is re-read at that moment and must still sit in
- *   the same block (reorg check); a post-success re-check against `finalized` follows (§8.12).
+ * - `confirmations`: evidence counts once `latest − block + 1 ≥ blocks` on the chain itself. Owner decision
+ *   2026-11-10 17:10 (ADR-0022 as amended): every EVM chain — Ethereum L1, Base, Arbitrum and the Tier B chains —
+ *   confirms on ONE block of its own chain (the receipt in a block on `latest`). The receipt is re-read right before
+ *   the evidence is applied and must still sit in the same block (reorg check); a post-success re-check against
+ *   `finalized` follows (§8.12).
  */
 
 export type EvmConfirmation =
@@ -15,12 +17,16 @@ export type EvmConfirmation =
 export const FINALIZED: EvmConfirmation = { kind: "finalized" };
 export const MAX_CONFIRMATIONS = 100_000;
 
-/** Defaults when the profile file and the environment say nothing: L2s confirm on their own blocks, L1 finalizes. */
-export const DEFAULT_EVM_CONFIRMATION: Readonly<Record<string, EvmConfirmation>> = {
-  "eip155:8453": { kind: "confirmations", blocks: 10 }, // Base, 2 s blocks ≈ 20 s
-  "eip155:42161": { kind: "confirmations", blocks: 40 }, // Arbitrum One, 0.25 s blocks ≈ 10 s
-  "eip155:1": FINALIZED,
-};
+/** One block of the chain's own `latest` head (owner decision 2026-11-10 17:10, ADR-0022 as amended). */
+export const ONE_BLOCK: EvmConfirmation = { kind: "confirmations", blocks: 1 };
+
+/**
+ * Default for an EVM chain when neither the profile file nor the environment says otherwise: one block on the chain
+ * itself, for every EVM chain (Ethereum ≈ 12 s, Base ≈ 2 s, Arbitrum ≈ 0.25 s after the transfer is mined).
+ */
+export function defaultEvmConfirmation(_chain: string): EvmConfirmation {
+  return ONE_BLOCK;
+}
 
 export class ConfirmationPolicyError extends Error {
   override readonly name = "ConfirmationPolicyError";
@@ -65,7 +71,8 @@ export function blockCounts(policy: EvmConfirmation, block: bigint, heads: { lat
   return block <= countedHead(policy, heads);
 }
 
-/** Human label of a policy (profile `finality` text, logs): `finalized` or `10 confirmations`. */
+/** Human label of a policy (profile `finality` text, logs): `finalized`, `1 confirmation` or `10 confirmations`. */
 export function policyLabel(p: EvmConfirmation): string {
-  return p.kind === "finalized" ? "finalized" : `${p.blocks} confirmations`;
+  if (p.kind === "finalized") return "finalized";
+  return p.blocks === 1 ? "1 confirmation" : `${p.blocks} confirmations`;
 }

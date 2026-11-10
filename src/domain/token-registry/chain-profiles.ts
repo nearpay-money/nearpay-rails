@@ -7,13 +7,16 @@
 import type { ConfirmationTier } from "@nearpay/spec";
 import { type ChainInfo, getChain } from "@nearpay-internal/chains";
 import { z } from "zod";
-import {
-  DEFAULT_EVM_CONFIRMATION,
-  type EvmConfirmation,
-  FINALIZED,
-  MAX_CONFIRMATIONS,
-  policyLabel,
-} from "../chains/evm.js";
+import { defaultEvmConfirmation, type EvmConfirmation, MAX_CONFIRMATIONS, policyLabel } from "../chains/evm.js";
+
+/**
+ * Default confirmations of a Bitcoin-family chain (BTC, and the LTC/DOGE profiles): ONE confirmation for every
+ * amount (owner decision 2026-11-10 17:10, ADR-0022 as amended; replaces the spec 0.4.0 USD tiers 1 below USD 1,000
+ * else 2). A profile's `confirmation_tiers` still overrides it (NP_CHAINS_FILE).
+ */
+export const ONE_CONFIRMATION: readonly ConfirmationTier[] = Object.freeze([
+  { below_usd_micros: null, confirmations: 1 },
+]);
 
 export const ChainProfileInput = z.object({
   chain: z.string().regex(/^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/),
@@ -26,7 +29,10 @@ export const ChainProfileInput = z.object({
   watcher: z.boolean().default(false),
   watch_interval_s: z.number().min(0.1).max(600).default(12),
   memo_mode: z.enum(["none", "required"]),
-  /** Stage 4 (§21.1): confirmations by settlement value (Bitcoin), ascending, the last tier unbounded. */
+  /**
+   * Stage 4 (§21.1): confirmations by settlement value (Bitcoin family), ascending, the last tier unbounded. Absent →
+   * {@link ONE_CONFIRMATION} (1 confirmation for every amount, ADR-0022 as amended); set it to require more.
+   */
   confirmation_tiers: z
     .array(
       z.object({
@@ -37,8 +43,8 @@ export const ChainProfileInput = z.object({
     .min(1)
     .optional(),
   /**
-   * EVM evidence rule (ADR-0022): `{kind: finalized}` or `{kind: confirmations, blocks}` (L2 block confirmations).
-   * Absent → the chain's default (Base 10, Arbitrum 40 confirmations; others `finalized`). EVM chains only.
+   * EVM evidence rule (ADR-0022): `{kind: finalized}` or `{kind: confirmations, blocks}` (blocks of the chain itself).
+   * Absent → one block (`{kind: confirmations, blocks: 1}`) on every EVM chain (ADR-0022 as amended). EVM only.
    */
   evm_confirmation: z
     .discriminatedUnion("kind", [
@@ -80,7 +86,7 @@ export interface ChainProfile {
   readonly explorerTxUrl: string;
   /** Stage 4 (spec 0.4.0 `explorer_address_url`). */
   readonly explorerAddressUrl: string;
-  /** Stage 4 (spec 0.4.0 `confirmation_tiers`): null for chains with a finality flag. */
+  /** Stage 4 (spec 0.4.0 `confirmation_tiers`): Bitcoin family (default 1 confirmation); null for other chains. */
   readonly confirmationTiers: readonly ConfirmationTier[] | null;
   /** EVM evidence rule (ADR-0022); null for non-EVM chains. */
   readonly evmConfirmation: EvmConfirmation | null;
@@ -112,8 +118,6 @@ export function chainProfiles(doc: unknown): ChainProfiles {
       throw new ProfileError(
         `chain profile ${p.chain}: confirmation_tiers must ascend and end with one unbounded tier`,
       );
-    if (info.family === "bitcoin" && p.tier === "A" && !p.confirmation_tiers)
-      throw new ProfileError(`chain profile ${p.chain}: a Tier-A Bitcoin chain needs confirmation_tiers`);
     if (p.watcher && p.tier !== "A") throw new ProfileError(`chain profile ${p.chain}: a watched chain is Tier A`);
     if (p.evm_confirmation && info.family !== "evm")
       throw new ProfileError(`chain profile ${p.chain}: evm_confirmation is for EVM chains only`);
@@ -131,9 +135,8 @@ export function chainProfiles(doc: unknown): ChainProfiles {
       memoMode: p.memo_mode,
       explorerTxUrl: info.explorer.tx,
       explorerAddressUrl: info.explorer.address,
-      confirmationTiers: p.confirmation_tiers ?? null,
-      evmConfirmation:
-        info.family === "evm" ? (p.evm_confirmation ?? DEFAULT_EVM_CONFIRMATION[p.chain] ?? FINALIZED) : null,
+      confirmationTiers: p.confirmation_tiers ?? (info.family === "bitcoin" ? ONE_CONFIRMATION : null),
+      evmConfirmation: info.family === "evm" ? (p.evm_confirmation ?? defaultEvmConfirmation(p.chain)) : null,
       configuredTier: p.tier,
       info,
     });

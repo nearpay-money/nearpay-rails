@@ -135,7 +135,8 @@ const shared = {
   evmRpcUrls_42161: rpcList.default(["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"]),
   /**
    * EVM evidence rule overrides (`NP_EVM_CONFIRMATIONS_<CHAINID>` = `finalized` | N blocks, ADR-0022). Defaults come
-   * from config/chains.yaml: Base 10 and Arbitrum 40 L2 block confirmations, Ethereum `finalized`.
+   * from config/chains.yaml: one block of the chain's own `latest` head on every EVM chain (ADR-0022 as amended
+   * 2026-11-10 17:10).
    */
   evmConfirmations_1: evmConfirmation,
   evmConfirmations_8453: evmConfirmation,
@@ -143,11 +144,31 @@ const shared = {
   /** Post-success `finalized` re-check of confirmation-based EVM evidence (§8.12): window and cadence. */
   finalityRecheckWindowS: z.coerce.number().int().min(600).max(86_400).default(7200),
   finalityRecheckIntervalS: z.coerce.number().int().min(5).max(3600).default(60),
+  /** §8.12: Solana evidence (`confirmed` commitment) re-checked at `finalized` (≈ 13 s later): cadence and window. */
+  finalityRecheckSolanaIntervalS: z.coerce.number().int().min(2).max(3600).default(15),
+  finalityRecheckSolanaWindowS: z.coerce.number().int().min(300).max(86_400).default(1800),
+  /**
+   * §8.12: Bitcoin evidence (1 confirmation) re-checked until the transaction has this many confirmations in the same
+   * block (best chain), every interval, for at most the window (6 h).
+   */
+  finalityRecheckBitcoinConfirmations: z.coerce.number().int().min(2).max(100).default(6),
+  finalityRecheckBitcoinIntervalS: z.coerce.number().int().min(10).max(3600).default(60),
+  finalityRecheckBitcoinWindowS: z.coerce
+    .number()
+    .int()
+    .min(3600)
+    .max(3 * 86_400)
+    .default(21_600),
   /**
    * Stage 4 (§21.4): Solana RPC pool (≥ 2 recommended: the public endpoint + an owner-provided provider). Empty →
    * Solana is Tier B (provider-attested within `NP_TIER_B_LIMITS`) and its watcher is off.
    */
   solanaRpcUrls: rpcList.default(["https://api.mainnet-beta.solana.com"]),
+  /**
+   * Solana evidence commitment (ADR-0022 as amended 2026-11-10 17:10): `confirmed` (supermajority-voted slot, Solana's
+   * one-block confirmation; re-checked at `finalized`, §8.12) or `finalized` (no re-check). `processed` is refused.
+   */
+  solanaCommitment: z.enum(["confirmed", "finalized"]).default("confirmed"),
   /** Stage 4 (§21.4): Bitcoin Esplora pool (keyless). Empty → Bitcoin is Tier B. */
   bitcoinEsploraUrls: rpcList.default(["https://mempool.space/api", "https://blockstream.info/api"]),
   /**

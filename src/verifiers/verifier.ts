@@ -3,16 +3,19 @@
  * SUCCESS for, without watcher/indexer evidence yet, are checked against the destination chain using
  * the provider's destination tx hashes.
  *
- * - Tier A, EVM: receipt status 1 and the chain's confirmation policy (ADR-0022: block ≤ `finalized`, or
- *   `latest − block + 1 ≥ blocks` with the receipt re-read in the same block — evidence `confirmed`, followed by the
- *   post-success `finalized` re-check, finality-recheck.ts); ERC-20 `Transfer(to = recipient)` on the token
+ * - Tier A, EVM: receipt status 1 and the chain's confirmation policy (ADR-0022 as amended 2026-11-10 17:10: one
+ *   block of the chain's own `latest` head by default — `latest − block + 1 ≥ 1` — with the receipt re-read in the
+ *   same block right before the evidence applies; evidence `confirmed`, followed by the post-success `finalized`
+ *   re-check, finality-recheck.ts; `finalized` / N blocks by override); ERC-20 `Transfer(to = recipient)` on the token
  *   contract, or a native transfer (`tx.to == recipient`). Large amounts need a second RPC's agreement. An internal
  *   native transfer cannot be proven: Tier B rules apply.
  * - Tier A, NEAR: `EXPERIMENTAL_tx_status` FINAL; `mt_transfer` to the Intents account (intents.near)
  *   or NEP-141 `ft_transfer` to the account (token contract).
  * - Test mode: the sandbox's simulated chain (`/sim/chains/{chain}/tx/{hash}`).
  * - Tier B chains: the provider's word within `NP_TIER_B_LIMITS`.
- * Not final / not found → retried every 10 s until `verification_timeout_s` → `held`.
+ * Not final / not found → retried every 2 s (Bitcoin: 5 s; ADR-0022 as amended — one block confirms, so the next
+ * look should follow the next block closely) until `verification_timeout_s` → `held`. Idle, the loop looks for due
+ * work every 500 ms.
  */
 
 import { sql } from "@nearpay-internal/db";
@@ -68,8 +71,16 @@ export interface VerifyOutcome {
   readonly chainDetail?: EvidenceChainDetail;
 }
 
-const RETRY_MS = 10_000;
+/** Retry of a not-yet-final verification (§8.8): 2 s (EVM, NEAR, Solana blocks are ≤ 12 s), Bitcoin 5 s. */
+export const RETRY_MS = 2_000;
+export const BITCOIN_RETRY_MS = 5_000;
+/** Idle cadence of the verifier loop (a claim query per tick). */
+export const VERIFIER_TICK_MS = 500;
 const LEASE_MS = 30_000;
+
+export function retryMsFor(r: Rails, chain: string): number {
+  return r.profiles.get(chain)?.family === "bitcoin" ? BITCOIN_RETRY_MS : RETRY_MS;
+}
 
 const pending = (details: Record<string, unknown>, tier: "A" | "B" = "A"): VerifyOutcome => ({
   result: "pending",
@@ -450,7 +461,7 @@ export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20): Prom
           r,
           tx,
           cur,
-          { verifyAt: new Date(r.now() + RETRY_MS) },
+          { verifyAt: new Date(r.now() + retryMsFor(r, cur.destination_chain)) },
           { cause: "verify later", actor: "verifier" },
         );
         return;
@@ -477,7 +488,7 @@ export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20): Prom
           r,
           tx,
           after,
-          { verifyAt: timedOut || v.holdNow ? null : new Date(r.now() + RETRY_MS) },
+          { verifyAt: timedOut || v.holdNow ? null : new Date(r.now() + retryMsFor(r, cur.destination_chain)) },
           {
             cause: "re-verify",
             actor: "verifier",
@@ -517,7 +528,7 @@ export function verifierTask(r: Rails, deps: VerifierDeps, o: { tickMs?: number 
         running = verifyOnce(r, deps)
           .catch((e) => r.log.error({ err: e }, "verifier tick failed"))
           .then(() => {
-            if (!stopped) timer = setTimeout(tick, o.tickMs ?? 1_000);
+            if (!stopped) timer = setTimeout(tick, o.tickMs ?? VERIFIER_TICK_MS);
           });
       };
       tick();

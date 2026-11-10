@@ -54,7 +54,11 @@ beforeAll(async () => {
     oneclick: one,
     config: { treasuryAccount: TREASURY },
     tracker: {
-      evm: new Map([["eip155:8453", evmRpc({ urls: [anvil.url] })]]),
+      // Anvil stands in for Base and (one-block rule, ADR-0022 as amended) for Ethereum L1
+      evm: new Map([
+        ["eip155:8453", evmRpc({ urls: [anvil.url] })],
+        ["eip155:1", evmRpc({ urls: [anvil.url] })],
+      ]),
       near: nearRpc({ urls: [nearRpcServer.url] }),
     },
   });
@@ -394,17 +398,14 @@ describe("EVM destination watcher (Anvil)", () => {
       .where("id", "=", toUuid(id, "ex"))
       .executeTakeFirstOrThrow();
 
-  it("Base: attributes a Transfer of exactly base + tag once it has 10 L2 confirmations (confirmed), then the finalized re-check passes", async () => {
+  it("Base: attributes a Transfer of exactly base + tag in its own block (1 confirmation, `confirmed`), then the finalized re-check passes", async () => {
     const rpc = evmRpc({ urls: [anvil.url] });
     const x = await create(live());
     await watch(x.settlement.recipient);
-    await watchOnce(s.rails, "eip155:8453", rpc); // starts the cursor at the counted head (latest − 9)
+    await watchOnce(s.rails, "eip155:8453", rpc); // starts the cursor 10 blocks below the counted head (latest)
     const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
     const stray = await anvil.transfer(token, x.settlement.recipient, 12_345n);
-    await anvil.mine(5); // the payout has 7 confirmations
-    for (let i = 0; i < 3; i++) await watchOnce(s.rails, "eip155:8453", rpc);
-    expect((await get(x.id)).state).toBe("awaiting_deposit"); // not deep enough: not counted yet
-    await anvil.mine(5); // 12 confirmations
+    // ADR-0022 as amended: the payout's own block (latest − block + 1 = 1 … 2) is enough — no further blocks mined
     let scanned = 0;
     for (let i = 0; i < 5 && (await get(x.id)).state !== "succeeded"; i++)
       scanned += await watchOnce(s.rails, "eip155:8453", rpc);
@@ -426,8 +427,8 @@ describe("EVM destination watcher (Anvil)", () => {
       .where("execution_id", "=", toUuid(x.id, "ex"))
       .execute();
     expect(v).toMatchObject({ result: "pass", finality: "confirmed", source: "watcher" });
-    expect(v?.details).toMatchObject({ block_hash: receipt.blockHash, required_confirmations: 10 });
-    expect((v?.details as { confirmations?: number } | undefined)?.confirmations ?? 0).toBeGreaterThanOrEqual(10);
+    expect(v?.details).toMatchObject({ block_hash: receipt.blockHash, required_confirmations: 1 });
+    expect((v?.details as { confirmations?: number } | undefined)?.confirmations ?? 0).toBeGreaterThanOrEqual(1);
     const un = await s.admin.db.selectFrom("unattributed_transfers").selectAll().where("tx_hash", "=", stray).execute();
     expect(un.map((u) => [u.amount, u.recipient])).toEqual([["12345", x.settlement.recipient]]);
 
@@ -467,7 +468,6 @@ describe("EVM destination watcher (Anvil)", () => {
     await watchOnce(s.rails, "eip155:8453", honest);
     const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
     const { blockNumber } = await anvil.rpc<{ blockNumber: string }>("eth_getTransactionReceipt", [hash]);
-    await anvil.mine(12);
     for (let i = 0; i < 3; i++) await watchOnce(s.rails, "eip155:8453", reorged);
     expect((await get(x.id)).state).toBe("awaiting_deposit");
     // the cursor stops just before the reorganised block, so the next scan sees the log again
@@ -498,16 +498,50 @@ describe("EVM destination watcher (Anvil)", () => {
     await create(live());
     await anvil.mine(3);
     expect(await watchOnce(s.rails, "eip155:8453", rpc)).toBe(0);
-    // Base counts 10 L2 confirmations (ADR-0022): the counted head is latest − 9
+    // Base counts one block (ADR-0022 as amended): the counted head is `latest` itself, and first sight starts
+    // FIRST_SIGHT_MARGIN (10) blocks below it so a payout in the block the watcher first sees is not skipped
     const latest = await anvil.rpc<string>("eth_blockNumber");
     expect((await readCursor<{ block: string }>(s.rails, "evm:eip155:8453"))?.block).toBe(
-      (BigInt(latest) - 9n).toString(),
+      (BigInt(latest) - 10n).toString(),
     );
   });
 });
 
+describe("EVM watcher first sight (one-block rule)", () => {
+  it("a payout mined in the very block the watcher first sees demand is still attributed", async () => {
+    const rpc = evmRpc({ urls: [anvil.url] });
+    await s.admin.db
+      .updateTable("executions")
+      .set({ terminal_at: new Date(), state: "failed" })
+      .where("livemode", "=", true)
+      .where("terminal_at", "is", null)
+      .execute();
+    expect(await watchOnce(s.rails, "eip155:8453", rpc)).toBe(0); // idle: cursor forgotten
+    const x = await create(live());
+    await s.admin.db
+      .insertInto("watched_destinations")
+      .values({
+        destination_id: randomUUID(),
+        account_id: toUuid(ACCOUNT, "acct"),
+        livemode: true,
+        chain: "eip155:8453",
+        address_norm: x.settlement.recipient,
+        asset_id: USDC_BASE,
+        type: "chain_address",
+        active: true,
+        source_version: 1,
+      })
+      .execute();
+    // the payout lands before the (just-elected) watcher's first step: it is the head block at first sight
+    const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
+    await watchOnce(s.rails, "eip155:8453", rpc); // first sight
+    for (let i = 0; i < 3 && (await get(x.id)).state !== "succeeded"; i++) await watchOnce(s.rails, "eip155:8453", rpc);
+    expect(await get(x.id)).toMatchObject({ state: "succeeded", evidence: { tx_hash: hash, finality: "confirmed" } });
+  });
+});
+
 describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
-  it("EVM (Base): provider SUCCESS → verifying → pending below 10 confirmations → succeeded `confirmed` on the receipt", async () => {
+  it("EVM (Base): provider SUCCESS → verifying → succeeded `confirmed` on the receipt in its own block (1 confirmation)", async () => {
     const x = await create(live());
     const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
     one.statuses.set(x.deposit?.address as string, {
@@ -515,11 +549,7 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
       swapDetails: { amountOut: x.settlement.expected, destinationChainTxHashes: [{ hash, explorerUrl: "" }] },
     });
     await s.call("POST", `/internal/executions/${x.id}/signals`, { body: { type: "payer_sent" } });
-    await until(x.id, (e) => e.state === "verifying");
-    await anvil.mine(7); // 8 confirmations
-    await new Promise((r) => setTimeout(r, 400));
-    expect((await get(x.id)).state).toBe("verifying"); // below the threshold
-    await anvil.mine(2); // 10 confirmations: counts (no wait for Ethereum finality)
+    // ADR-0022 as amended: no further block is needed — the receipt's own block confirms it
     const done = await until(x.id, (e) => e.state === "succeeded");
     expect(done.evidence).toMatchObject({
       source: "verifier",
@@ -536,8 +566,8 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
       .execute();
     expect(v.map((r) => r.result)).toEqual(["pass"]); // pending attempts are not recorded
     expect(v[0]?.finality).toBe("confirmed");
-    expect(v[0]?.details).toMatchObject({ block_hash: receipt.blockHash, required_confirmations: 10 });
-    expect((v[0]?.details as { confirmations?: number } | undefined)?.confirmations ?? 0).toBeGreaterThanOrEqual(10);
+    expect(v[0]?.details).toMatchObject({ block_hash: receipt.blockHash, required_confirmations: 1 });
+    expect((v[0]?.details as { confirmations?: number } | undefined)?.confirmations ?? 0).toBeGreaterThanOrEqual(1);
     const row = await s.admin.db
       .selectFrom("executions")
       .select(["finality_recheck_status", "finality_recheck_block_hash"])
@@ -685,6 +715,29 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
       amount: "1000000000000",
       sender: expect.stringMatching(/^0x[0-9a-f]{40}$/), // the transaction's `from`
     });
+  });
+
+  it("Ethereum L1 (ADR-0022 as amended): one block confirms — no wait for `finalized`; the re-check is scheduled", async () => {
+    const to = randomEvm();
+    const hash = await anvil.sendNative(to, 2_000_000_000_000n); // the head block: far from Anvil's finalized tag
+    const id = await insertExecution({
+      state: "verifying",
+      destinationChain: "eip155:1",
+      recipient: to,
+      recipientType: "destination_chain",
+      asset: "nep141:eth.omft.near",
+      base: 2_000_000_000_000n,
+      txHashes: [hash],
+    });
+    const done = await until(id, (e) => e.state === "succeeded", 5_000);
+    expect(done.evidence).toMatchObject({ chain: "eip155:1", tier: "A", finality: "confirmed", tx_hash: hash });
+    const receipt = await anvil.rpc<{ blockHash: string }>("eth_getTransactionReceipt", [hash]);
+    const row = await s.admin.db
+      .selectFrom("executions")
+      .select(["finality_recheck_status", "finality_recheck_block_hash"])
+      .where("id", "=", toUuid(id, "ex"))
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({ finality_recheck_status: "pending", finality_recheck_block_hash: receipt.blockHash });
   });
 
   it("NEAR: the recorded mt_transfer to an Intents account passes; an unknown tx is held at the timeout", async () => {

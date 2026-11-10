@@ -28,10 +28,14 @@ export interface Anvil {
   container: StartedTestContainer;
 }
 
-export async function startAnvil(): Promise<Anvil> {
+/**
+ * `autoMine: false` → `--no-mining`: transactions wait in the pool until a block is mined with {@link Anvil.mine}
+ * (tests drive a steady block cadence themselves, e.g. Base's 2 s).
+ */
+export async function startAnvil(o: { autoMine?: boolean } = {}): Promise<Anvil> {
   const container = await new GenericContainer(ANVIL_IMAGE)
     .withEntrypoint(["anvil"])
-    .withCommand(["--host", "0.0.0.0", "--port", "8545"])
+    .withCommand(["--host", "0.0.0.0", "--port", "8545", ...(o.autoMine === false ? ["--no-mining"] : [])])
     .withExposedPorts(8545)
     .withWaitStrategy(Wait.forLogMessage(/Listening on/))
     .start();
@@ -50,7 +54,7 @@ export async function startAnvil(): Promise<Anvil> {
   const [account] = await rpc<string[]>("eth_accounts");
   const send = async (tx: Record<string, string>) => {
     const hash = await rpc<string>("eth_sendTransaction", [{ from: account, ...tx }]);
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 400; i++) {
       const receipt = await rpc<{ status: string; contractAddress: string | null } | null>(
         "eth_getTransactionReceipt",
         [hash],

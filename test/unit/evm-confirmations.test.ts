@@ -1,4 +1,7 @@
-/** ADR-0022: EVM confirmation policy (profiles, env overrides), the confirmation check and the finalized re-check. */
+/**
+ * ADR-0022 (as amended 2026-11-10 17:10: one block on every EVM chain): EVM confirmation policy (profiles, env
+ * overrides), the confirmation check and the finalized re-check.
+ */
 import { ConfigError, loadConfig } from "@nearpay-internal/service";
 import { describe, expect, it } from "vitest";
 import { loadProfiles } from "../../src/app/services.js";
@@ -8,8 +11,9 @@ import {
   ConfirmationPolicyError,
   confirmationsOf,
   countedHead,
-  DEFAULT_EVM_CONFIRMATION,
+  defaultEvmConfirmation,
   type EvmConfirmation,
+  ONE_BLOCK,
   parseEvmConfirmation,
   policyLabel,
 } from "../../src/domain/chains/evm.js";
@@ -83,22 +87,36 @@ describe("confirmation policy (domain)", () => {
     expect(() => countedHead(TEN, { finalized: 1n })).toThrow(ConfirmationPolicyError);
     expect(() => countedHead({ kind: "finalized" }, { latest: 1n })).toThrow(ConfirmationPolicyError);
     expect(policyLabel(TEN)).toBe("10 confirmations");
+    expect(policyLabel(ONE_BLOCK)).toBe("1 confirmation");
     expect(policyLabel({ kind: "finalized" })).toBe("finalized");
   });
 });
 
 describe("chain profiles", () => {
-  it("defaults: Base 10 and Arbitrum 40 L2 confirmations; Ethereum stays finalized; non-EVM chains have none", () => {
+  it("defaults (owner 2026-11-10 17:10): ONE block on every EVM chain — Ethereum, Base, Arbitrum and Tier B", () => {
     const p = loadProfiles();
-    expect(p.get("eip155:8453")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 10 });
-    expect(p.get("eip155:42161")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 40 });
-    expect(p.get("eip155:1")?.evmConfirmation).toEqual({ kind: "finalized" });
+    const evm = p.all().filter((x) => x.family === "evm");
+    expect(evm.map((x) => x.chain).sort()).toEqual(
+      [
+        "eip155:1",
+        "eip155:10",
+        "eip155:100",
+        "eip155:137",
+        "eip155:42161",
+        "eip155:43114",
+        "eip155:56",
+        "eip155:8453",
+      ].sort(),
+    );
+    for (const x of evm) {
+      expect(x.evmConfirmation).toEqual({ kind: "confirmations", blocks: 1 });
+      expect(p.view(x).finality).toBe("1 confirmation"); // Tier B chains display it too
+    }
     expect(p.get("near:mainnet")?.evmConfirmation).toBeNull();
     const view = (c: string) => p.view(p.get(c) as NonNullable<ReturnType<typeof p.get>>);
-    expect(view("eip155:8453").finality).toBe("10 confirmations");
-    expect(view("eip155:1").finality).toBe("finalized");
-    expect(view("near:mainnet").finality).toBe("final");
-    expect(DEFAULT_EVM_CONFIRMATION["eip155:1"]).toEqual({ kind: "finalized" });
+    expect(view("near:mainnet").finality).toBe("final"); // NEAR keeps `final` (Doomslug: the block plus one)
+    expect(defaultEvmConfirmation("eip155:1")).toEqual(ONE_BLOCK);
+    expect(defaultEvmConfirmation("eip155:8453")).toEqual(ONE_BLOCK);
   });
 
   it("a profile without evm_confirmation takes the chain default; non-EVM chains refuse the field", () => {
@@ -114,8 +132,8 @@ describe("chain profiles", () => {
     };
     const eth = { ...base, chain: "eip155:1", blockchain: "eth" };
     const p = chainProfiles({ chains: [base, eth] });
-    expect(p.get("eip155:8453")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 10 });
-    expect(p.get("eip155:1")?.evmConfirmation).toEqual({ kind: "finalized" });
+    expect(p.get("eip155:8453")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 1 });
+    expect(p.get("eip155:1")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 1 });
     expect(
       chainProfiles({ chains: [{ ...base, evm_confirmation: { kind: "finalized" } }] }).get("eip155:8453")
         ?.evmConfirmation,
@@ -145,7 +163,8 @@ describe("chain profiles", () => {
     });
     expect(p.get("eip155:8453")?.evmConfirmation).toEqual({ kind: "finalized" });
     expect(p.get("eip155:42161")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 120 });
-    expect(p.get("eip155:1")?.evmConfirmation).toEqual({ kind: "finalized" });
+    expect(p.get("eip155:1")?.evmConfirmation).toEqual({ kind: "confirmations", blocks: 1 }); // no override: default
+    expect(p.view(p.get("eip155:8453") as never).finality).toBe("finalized"); // the view shows the effective rule
     expect(() => loadProfiles().withEvmConfirmations({ "eip155:999999": TEN })).toThrow(ProfileError);
     expect(() => loadProfiles().withEvmConfirmations({ "near:mainnet": TEN })).toThrow(ProfileError);
   });
@@ -169,6 +188,27 @@ describe("chain profiles", () => {
 });
 
 describe("checkEvmConfirmation", () => {
+  it("one block (default): the receipt in the `latest` block counts, after one same-block re-read", async () => {
+    const head = fakeRpc({ latest: 100n, receipts: [receipt()] });
+    expect(await checkEvmConfirmation(head.rpc, ONE_BLOCK, receipt())).toEqual({
+      kind: "counted",
+      finality: "confirmed",
+      confirmations: 1,
+      blockHash: BLOCK_HASH,
+      blockNumber: 100n,
+    });
+    expect(head.calls).toEqual(["latest", "receipt"]); // exactly one re-read right before the evidence applies
+    // a head behind the receipt's block (a lagging endpoint) is not a confirmation
+    const behind = fakeRpc({ latest: 99n, receipts: [receipt()] });
+    expect(await checkEvmConfirmation(behind.rpc, ONE_BLOCK, receipt())).toMatchObject({
+      kind: "pending",
+      details: { confirmations: 0, required_confirmations: 1 },
+    });
+    // the block was replaced between the two reads: nothing counts
+    const swapped = fakeRpc({ latest: 100n, receipts: [receipt({ blockHash: OTHER_HASH })] });
+    expect((await checkEvmConfirmation(swapped.rpc, ONE_BLOCK, receipt())).kind).toBe("reorged");
+  });
+
   it("below the threshold is pending (9 of 10); at the threshold it counts as confirmed after the re-read", async () => {
     const short = fakeRpc({ latest: 108n, receipts: [receipt()] });
     expect(await checkEvmConfirmation(short.rpc, TEN, receipt())).toEqual({

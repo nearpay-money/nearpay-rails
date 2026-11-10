@@ -4,7 +4,7 @@ import { parseVaultEventLog } from "@nearpay/spec";
 import { VaultEventRecord, vaultEventDedupeKey } from "@nearpay-internal/spec";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
-import { chainProfiles, ProfileError } from "../../src/domain/token-registry/chain-profiles.js";
+import { chainProfiles, ONE_CONFIRMATION, ProfileError } from "../../src/domain/token-registry/chain-profiles.js";
 import { contractBinding, registryRows } from "../../src/domain/token-registry/registry.js";
 import { aggregateUuid, type VaultReceipt, vaultEventsOf } from "../../src/trackers/near-indexer/vault.js";
 import { toKey } from "../../src/verifiers/chains.js";
@@ -18,9 +18,23 @@ const VAULT = specVector<Any>("vault.json");
 const doc = parseYaml(readFileSync(new URL("../../config/chains.yaml", import.meta.url), "utf8"));
 const profiles = chainProfiles(doc);
 
+/**
+ * The owner's one-block rule (ADR-0022 as amended 2026-11-10 17:10) changes two profile values the spec 0.4.0 vectors
+ * still carry from Stage 4: Solana `finality` (`confirmed` commitment, was `finalized`) and the Bitcoin
+ * `finality`/`confirmation_tiers` (1 confirmation for every amount, was 1 below USD 1,000 else 2). Everything else must
+ * equal the vector; a spec follow-up updates the vectors (ChainProfile's schema accepts both).
+ */
+const AMENDED: Record<string, { finality: string; confirmation_tiers: unknown }> = {
+  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": { finality: "solana: confirmed commitment", confirmation_tiers: null },
+  "bip122:000000000019d6689c085ae165831e93": {
+    finality: "bitcoin: 1 confirmation",
+    confirmation_tiers: [{ below_usd_micros: null, confirmations: 1 }],
+  },
+};
+
 describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
   for (const want of V.chains as Any[]) {
-    it(`${want.blockchain}: the shipped profile view equals the vector`, () => {
+    it(`${want.blockchain}: the shipped profile view equals the vector, with the owner's one-block rule`, () => {
       const p = profiles.get(want.chain);
       expect(p).toBeDefined();
       expect(profiles.view(p as never)).toEqual({
@@ -36,9 +50,23 @@ describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
         explorer_tx_url: want.explorer_tx_url,
         explorer_address_url: want.explorer_address_url,
         confirmation_tiers: want.confirmation_tiers,
+        ...AMENDED[want.chain],
       });
     });
   }
+
+  it("Bitcoin family (BTC, LTC, DOGE): 1 confirmation for every amount by default", () => {
+    for (const chain of [
+      "bip122:000000000019d6689c085ae165831e93",
+      "bip122:12a765e31ffd4059bada1e25190f6e98",
+      "bip122:1a91e3dace36e2be3bf030a65679fe82",
+    ]) {
+      const p = profiles.get(chain);
+      expect(p?.confirmationTiers).toEqual(ONE_CONFIRMATION);
+      expect(p?.finality).toMatch(/1 confirmation$/);
+    }
+    expect(ONE_CONFIRMATION).toEqual([{ below_usd_micros: null, confirmations: 1 }]);
+  });
 
   it("EVM and NEAR profiles carry no confirmation tiers", () => {
     expect(profiles.view(profiles.get("eip155:8453") as never).confirmation_tiers).toBeNull();
@@ -65,7 +93,6 @@ describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
     memo_mode: "none",
   };
   it.each([
-    [{ ...base }, /needs confirmation_tiers/],
     [{ ...base, confirmation_tiers: [{ below_usd_micros: 5, confirmations: 1 }] }, /ascend/],
     [
       {
@@ -103,8 +130,18 @@ describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
     expect(() => chainProfiles({ chains: [p] })).toThrow(msg);
   });
 
-  it("a Tier-B Bitcoin profile without tiers is accepted", () => {
-    expect(chainProfiles({ chains: [{ ...base, tier: "B" }] }).get(base.chain)?.confirmationTiers).toBeNull();
+  it("a Bitcoin profile without tiers (Tier A or B) takes 1 confirmation; tiers in the profile override it", () => {
+    expect(chainProfiles({ chains: [base] }).get(base.chain)?.confirmationTiers).toEqual(ONE_CONFIRMATION);
+    expect(chainProfiles({ chains: [{ ...base, tier: "B" }] }).get(base.chain)?.confirmationTiers).toEqual(
+      ONE_CONFIRMATION,
+    );
+    const strict = [
+      { below_usd_micros: 1_000_000_000, confirmations: 1 },
+      { below_usd_micros: null, confirmations: 3 },
+    ];
+    expect(
+      chainProfiles({ chains: [{ ...base, confirmation_tiers: strict }] }).get(base.chain)?.confirmationTiers,
+    ).toEqual(strict);
   });
 });
 

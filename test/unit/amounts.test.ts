@@ -10,7 +10,7 @@ import {
   tagCandidates,
   tagSpace,
 } from "../../src/domain/execution/amounts.js";
-import { isExpired, nextPollAt } from "../../src/domain/execution/schedule.js";
+import { ACTIVE_FAST_POLLS, isExpired, nextPollAt } from "../../src/domain/execution/schedule.js";
 
 describe("settlement amounts (domain-model §3)", () => {
   it("merchant bearer nets the fee (rounded down); payer bearer keeps the settlement", () => {
@@ -112,11 +112,24 @@ describe("poll schedule (§8.4)", () => {
     explorerEnabled: false,
     awaitingSweepS: 30,
   };
-  it("polls fast after a signal: 2, 4, 8, 15, 15 s; 5 min after 2 h", () => {
-    expect([0, 1, 2, 3, 9].map((pollCount) => (nextPollAt({ ...base, pollCount }) as number) - base.nowMs)).toEqual([
+  it("signalled awaiting a deposit: 2, 4, 8, 15, 15 s; 5 min after 2 h", () => {
+    const a = { ...base, state: "awaiting_deposit" as const };
+    expect([0, 1, 2, 3, 9].map((pollCount) => (nextPollAt({ ...a, pollCount }) as number) - base.nowMs)).toEqual([
       2_000, 4_000, 8_000, 15_000, 15_000,
     ]);
-    expect((nextPollAt({ ...base, nowMs: 7_300_000 }) as number) - 7_300_000).toBe(300_000);
+    expect((nextPollAt({ ...a, nowMs: 7_300_000 }) as number) - 7_300_000).toBe(300_000);
+  });
+
+  it("deposit in flight (ADR-0022 as amended): every 2 s for the first 150 polls, then 4, 8, 15 s; 5 min after 2 h", () => {
+    for (const state of ["deposit_detected", "incomplete_deposit", "settling"] as const) {
+      const at = (pollCount: number) => (nextPollAt({ ...base, state, pollCount }) as number) - base.nowMs;
+      expect([0, 1, 9, 50, ACTIVE_FAST_POLLS - 1].map(at)).toEqual([2_000, 2_000, 2_000, 2_000, 2_000]);
+      expect([ACTIVE_FAST_POLLS, ACTIVE_FAST_POLLS + 1, ACTIVE_FAST_POLLS + 2, ACTIVE_FAST_POLLS + 40].map(at)).toEqual(
+        [4_000, 8_000, 15_000, 15_000],
+      );
+      expect((nextPollAt({ ...base, state, nowMs: 7_300_000 }) as number) - 7_300_000).toBe(300_000);
+    }
+    expect(ACTIVE_FAST_POLLS * 2).toBeLessThanOrEqual(300); // ≈ 5 min of 2 s polls at most
   });
 
   it("awaiting without a signal: sweeps every 30 s without Explorer, once at deadline + 10 min with it", () => {

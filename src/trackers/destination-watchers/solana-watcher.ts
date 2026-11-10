@@ -1,9 +1,11 @@
 /**
- * Solana watcher (lld/rails.md §21.2), leader-elected in `rails-feeds`, every 4 s, demand-driven like §8.6/§8.7:
+ * Solana watcher (lld/rails.md §21.2), leader-elected in `rails-feeds`, every 2 s, demand-driven like §8.6/§8.7:
  * no RPC call at all while no live execution needs it, and its cursor is forgotten then.
  *
  * - Destinations: for each owner with TAGGED in-flight executions, the watched account is the owner's ATA for the
- *   mint (SPL) or the owner (SOL). New finalized signatures (`getSignaturesForAddress … until: cursor`) are read
+ *   mint (SPL) or the owner (SOL). New `confirmed` signatures (ADR-0022 as amended: Solana's one-block confirmation;
+ *   evidence `finality: confirmed`, re-checked at `finalized` after success, §8.12; `getSignaturesForAddress …
+ *   until: cursor`) are read
  *   oldest first; failed ones (`err`) are skipped; each transaction's balance delta for (owner, mint) becomes an
  *   amount credit attributed by exact amount among tagged executions (`matchCredits`) → evidence with
  *   `Evidence.solana`. A payout that also creates the ATA is seen (the ATA is in the transaction) and counts in full.
@@ -193,7 +195,7 @@ export async function solanaWatchOnce(r: Rails, rpc: SolanaRpc, chain = SOLANA_M
         const res = await matchCredits(r, credits, {
           livemode: true,
           source: "watcher",
-          finality: "finalized",
+          finality: rpc.commitment === "finalized" ? "finalized" : "confirmed",
           confirm: (c) => agree(r, rpc, c),
         });
         settled += res.settled;

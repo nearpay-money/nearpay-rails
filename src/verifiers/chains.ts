@@ -1,12 +1,15 @@
 /**
  * Stage 4 verifier adapters (lld/rails.md §21.3, §21.5): Solana and Bitcoin, live and sandbox.
  *
- * - Solana: `getTransaction(sig, finalized)` per provider destination signature; not found / not finalized → retry;
- *   `meta.err` set → that signature proves nothing (another hash or the timeout → `held(evidence_timeout)`).
- *   Amount = the destination owner's balance delta for the asset (ATA created in the same tx counts in full).
- * - Bitcoin: Esplora `GET /tx/{txid}` + tip; Σ outputs re-derived to the destination; below the confirmations the
- *   profile's `confirmation_tiers` require for the settlement's USD value (price snapshot) → not final, retry.
- *   Bitcoin is never amount-tagged: this verifier, on the provider's txid, is its only evidence path.
+ * - Solana: `getTransaction(sig, confirmed)` per provider destination signature (ADR-0022 as amended: the slot is
+ *   voted by a supermajority — Solana's one-block confirmation; evidence `finality: confirmed`, re-checked at
+ *   `finalized` after success, §8.12); not found / not confirmed → retry; `meta.err` set → that signature proves
+ *   nothing (another hash or the timeout → `held(evidence_timeout)`). Amount = the destination owner's balance delta
+ *   for the asset (ATA created in the same tx counts in full).
+ * - Bitcoin: Esplora `GET /tx/{txid}` + tip; Σ outputs re-derived to the destination; 1 confirmation for every amount
+ *   by default (ADR-0022 as amended; a profile's `confirmation_tiers` may require more by USD value) → below it not
+ *   final, retry; re-checked at 6 confirmations in the same block after success (§8.12). Bitcoin is never
+ *   amount-tagged: this verifier, on the provider's txid, is its only evidence path.
  * - Agreement: at or above `NP_AGREEMENT_USD` a second pool endpoint must return the same amount and block (slot /
  *   block hash), as for EVM.
  * - Sandbox (§21.5): `SimTx` fills `Evidence.solana` / `Evidence.bitcoin` (`block_ref` → slot/height, transfers'
@@ -14,12 +17,7 @@
  *   `<chain>|<block_ref>`).
  */
 import { createHash } from "node:crypto";
-import {
-  BITCOIN_CONFIRMATION_TIERS,
-  type BitcoinEvidence,
-  type ConfirmationTier,
-  type SolanaEvidence,
-} from "@nearpay/spec";
+import type { BitcoinEvidence, ConfirmationTier, SolanaEvidence } from "@nearpay/spec";
 import { SimTx } from "@nearpay-internal/spec";
 import type { Rails } from "../app/context.js";
 import { tokenOf } from "../app/tokens.js";
@@ -33,6 +31,7 @@ import {
   snapshotUsdMicros,
 } from "../domain/chains/bitcoin.js";
 import { checkSolanaTransfer, splAssetId, TOKEN_PROGRAM } from "../domain/chains/solana.js";
+import { ONE_CONFIRMATION } from "../domain/token-registry/chain-profiles.js";
 import { compareTransfers, type ObservedTransfer } from "../domain/verification/verification.js";
 import type { Esplora } from "../infra/clients/esplora.js";
 import type { SolanaRpc } from "../infra/clients/solana.js";
@@ -76,11 +75,13 @@ export async function verifySolana(
   const expected = BigInt(row.amount_out_expected);
   const m = await solanaMint(r, row);
   if ("error" in m) return { ...pending({ reason: m.error }), holdNow: "evidence_mismatch" };
+  // `confirmed` (default) → evidence `confirmed`, re-checked at `finalized` after success (§8.12)
+  const finality = rpc.commitment === "finalized" ? "finalized" : "confirmed";
   let best: VerifyOutcome | null = null;
   for (const sig of hashes) {
     const tx = await rpc.transaction(sig);
     if (!tx) {
-      best ??= pending({ hash: sig, reason: "not found or not finalized" }, "not_found");
+      best ??= pending({ hash: sig, reason: `not found or not ${rpc.commitment} yet` }, "not_found");
       continue;
     }
     const c = checkSolanaTransfer(tx, sig, { owner, mint: m.mint, expected });
@@ -96,12 +97,12 @@ export async function verifySolana(
       result: c.result,
       tier: "A",
       source: "verifier",
-      finality: "finalized",
+      finality,
       txHash: sig,
       blockRef: String(c.detail.slot),
       amount: c.amount,
       sender: c.sender,
-      details: { hash: sig, slot: c.detail.slot },
+      details: { hash: sig, slot: c.detail.slot, commitment: rpc.commitment },
       chainDetail: { solana: c.detail, bitcoin: null },
     };
     if (c.result === "mismatch") {
@@ -181,13 +182,16 @@ export async function verifyBitcoin(
   return best ?? pending({ reason: "no destination transactions yet" });
 }
 
-/** Confirmations required for this execution's settlement (§21.1): tiers by USD value from its price snapshot. */
+/**
+ * Confirmations required for this execution's settlement (§21.1): the profile's tiers by USD value from its price
+ * snapshot; without tiers 1 confirmation for every amount (ADR-0022 as amended 2026-11-10 17:10).
+ */
 export async function requiredFor(r: Rails, row: ExecutionRow, tiers: readonly ConfirmationTier[]): Promise<number> {
   const decimals =
     row.destination_decimals ?? (await tokenOf(r, row.livemode, row.destination_asset_id))?.decimals ?? null;
   const usd =
     decimals === null ? null : snapshotUsdMicros(BigInt(row.amount_out_expected), decimals, row.price_snapshot);
-  return confirmationsRequired(tiers.length ? tiers : BITCOIN_CONFIRMATION_TIERS, usd);
+  return confirmationsRequired(tiers.length ? tiers : ONE_CONFIRMATION, usd);
 }
 
 const simBlockHash = (chain: string, blockRef: string) =>
@@ -280,7 +284,8 @@ export async function sandboxChainOutcome(
     result: c.result,
     tier: "A",
     source: "verifier",
-    finality: "finalized",
+    // as live (ADR-0022 as amended): Solana evidence is `confirmed`; test mode is never re-checked (§8.12)
+    finality: "confirmed",
     txHash: hash,
     blockRef,
     amount: c.amount,
