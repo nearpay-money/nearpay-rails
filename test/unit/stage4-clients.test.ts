@@ -1,6 +1,6 @@
 /** Stage 4 pools and clients (§21.4) with an injected fetch: failover, hedging, 429 back-off, health; sandbox vault feed. */
 
-import { BITCOIN_CONFIRMATION_TIERS } from "@nearpay/spec";
+import { BITCOIN_DEFAULT_CONFIRMATION_TIERS } from "@nearpay/spec";
 import { describe, expect, it } from "vitest";
 import type { Rails } from "../../src/app/context.js";
 import type { ExecutionRow } from "../../src/app/views.js";
@@ -278,7 +278,14 @@ describe("Bitcoin verifier agreement (§21.3: same amount and block from a secon
     health: () => ({ lastOkMs: null, failingSinceMs: null }),
   });
   const run = (second: Any) =>
-    verifyBitcoin({} as Rails, fake(second), row, [c.esplora_tx.txid], BITCOIN_CONFIRMATION_TIERS, async () => true);
+    verifyBitcoin(
+      {} as Rails,
+      fake(second),
+      row,
+      [c.esplora_tx.txid],
+      BITCOIN_DEFAULT_CONFIRMATION_TIERS,
+      async () => true,
+    );
 
   it("agrees → pass", async () => {
     expect((await run(structuredClone(c.esplora_tx))).result).toBe("pass");

@@ -1,6 +1,6 @@
 /** Stage 4: chain profiles vs the spec vectors, boot-time tiers, SPL registry binding, vault event rules (§21, §8.6). */
 import { readFileSync } from "node:fs";
-import { parseVaultEventLog } from "@nearpay/spec";
+import { BITCOIN_DEFAULT_CONFIRMATION_TIERS, parseVaultEventLog } from "@nearpay/spec";
 import { VaultEventRecord, vaultEventDedupeKey } from "@nearpay-internal/spec";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
@@ -18,23 +18,9 @@ const VAULT = specVector<Any>("vault.json");
 const doc = parseYaml(readFileSync(new URL("../../config/chains.yaml", import.meta.url), "utf8"));
 const profiles = chainProfiles(doc);
 
-/**
- * The owner's one-block rule (ADR-0022 as amended 2026-11-10 17:10) changes two profile values the spec 0.4.0 vectors
- * still carry from Stage 4: Solana `finality` (`confirmed` commitment, was `finalized`) and the Bitcoin
- * `finality`/`confirmation_tiers` (1 confirmation for every amount, was 1 below USD 1,000 else 2). Everything else must
- * equal the vector; a spec follow-up updates the vectors (ChainProfile's schema accepts both).
- */
-const AMENDED: Record<string, { finality: string; confirmation_tiers: unknown }> = {
-  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": { finality: "solana: confirmed commitment", confirmation_tiers: null },
-  "bip122:000000000019d6689c085ae165831e93": {
-    finality: "bitcoin: 1 confirmation",
-    confirmation_tiers: [{ below_usd_micros: null, confirmations: 1 }],
-  },
-};
-
 describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
   for (const want of V.chains as Any[]) {
-    it(`${want.blockchain}: the shipped profile view equals the vector, with the owner's one-block rule`, () => {
+    it(`${want.blockchain}: the shipped profile view equals the vector`, () => {
       const p = profiles.get(want.chain);
       expect(p).toBeDefined();
       expect(profiles.view(p as never)).toEqual({
@@ -50,7 +36,6 @@ describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
         explorer_tx_url: want.explorer_tx_url,
         explorer_address_url: want.explorer_address_url,
         confirmation_tiers: want.confirmation_tiers,
-        ...AMENDED[want.chain],
       });
     });
   }
@@ -66,6 +51,7 @@ describe("Solana and Bitcoin chain profiles (spec vectors `chains`)", () => {
       expect(p?.finality).toMatch(/1 confirmation$/);
     }
     expect(ONE_CONFIRMATION).toEqual([{ below_usd_micros: null, confirmations: 1 }]);
+    expect(ONE_CONFIRMATION).toEqual(BITCOIN_DEFAULT_CONFIRMATION_TIERS); // spec 0.4.2 default
   });
 
   it("EVM and NEAR profiles carry no confirmation tiers", () => {
