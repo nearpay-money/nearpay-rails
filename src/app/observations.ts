@@ -14,6 +14,7 @@ import { decideEvidence, decideProviderStatus, type HeldReason, type State } fro
 import type { VerificationResult } from "../domain/verification/verification.js";
 import type { EvidenceRow, ObservationSource } from "../infra/db/schema.js";
 import type { Rails, Tx } from "./context.js";
+import { needsFinalityRecheck, scheduleFinalityRecheck } from "./finality.js";
 import { applyChange, type Change, type ChangeMeta, lockExecution } from "./ledger.js";
 import type { ExecutionRow } from "./views.js";
 
@@ -252,7 +253,7 @@ export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: Evid
       },
     );
   }
-  return applyChange(
+  const settled = await applyChange(
     r,
     tx,
     cur,
@@ -269,6 +270,10 @@ export async function applyEvidence(r: Rails, tx: Tx, cur: ExecutionRow, e: Evid
       evidence: { ...evidence, verification_id: verificationId },
     },
   );
+  // ADR-0022: confirmation-based EVM evidence is re-checked against `finalized` after success (§8.12)
+  if (settled.state === "succeeded" && cur.state !== "succeeded" && needsFinalityRecheck(r, cur, e))
+    await scheduleFinalityRecheck(r, tx, settled, e);
+  return settled;
 }
 
 /** Locks, then applies evidence (watchers and indexer work outside a row lock). */

@@ -39,7 +39,14 @@ import { STREAMS, type Subject } from "@nearpay-internal/spec";
 import { parse as parseYaml } from "yaml";
 import { railsRoutes } from "../api/routes.js";
 import { type ArchiveStore, archiveStore } from "../archive/store.js";
-import { type ApiConfig, evmRpcUrls, type FeedsConfig, type SharedConfig, type TrackerConfig } from "../config.js";
+import {
+  type ApiConfig,
+  evmConfirmationOverrides,
+  evmRpcUrls,
+  type FeedsConfig,
+  type SharedConfig,
+  type TrackerConfig,
+} from "../config.js";
 import { deadLetters, railsHandlers } from "../consumers/handlers.js";
 import { DEFAULT_POLICY } from "../domain/pricing/pricing.js";
 import { type ChainProfiles, chainProfiles } from "../domain/token-registry/chain-profiles.js";
@@ -66,6 +73,7 @@ import { solanaWatchOnce } from "../trackers/destination-watchers/solana-watcher
 import { explorerOnce } from "../trackers/explorer-feed/feed.js";
 import { pollerTask } from "../trackers/hot-poller/poller.js";
 import { indexOnce, sandboxFeedOnce } from "../trackers/near-indexer/indexer.js";
+import { finalityRecheckTask } from "../verifiers/finality-recheck.js";
 import { verifierTask } from "../verifiers/verifier.js";
 import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
@@ -173,7 +181,10 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: n
     })();
   const budgets = deps.budgets ?? createBudgets({ valkeyUrl: config.valkeyUrl });
   // §21.4: Solana/Bitcoin are Tier A only with their RPC pool configured (computed once at boot)
-  const effective = loadProfiles(config.chainsFile).withPools(chainPoolConfigured(config));
+  // ADR-0022: NP_EVM_CONFIRMATIONS_<CHAINID> overrides the profile file's EVM evidence rule
+  const effective = loadProfiles(config.chainsFile)
+    .withEvmConfirmations(evmConfirmationOverrides(config))
+    .withPools(chainPoolConfigured(config));
   const providers: Providers = deps.providers ?? {
     live: oneClickProvider({
       baseUrl: config.oneclickBaseUrl,
@@ -248,6 +259,7 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: n
     awaitingSweepS: config.awaitingSweepS,
     screeningFailClosedUsdMicros: usdMicros(config.screeningFailClosedUsd),
     agreementUsdMicros: usdMicros(config.agreementUsd),
+    finalityRecheck: { windowS: config.finalityRecheckWindowS, intervalS: config.finalityRecheckIntervalS },
     vault: { live: config.vaultContract ?? null, test: config.testVaultContract },
     random: deps.random ?? Math.random,
     now: deps.now ?? Date.now,
@@ -346,6 +358,8 @@ export function createTracker(config: TrackerConfig, deps: TrackerDeps = {}): { 
   };
   service.addBackground(pollerTask(b.rails, deps.tickMs ? { tickMs: deps.tickMs } : {}));
   service.addBackground(verifierTask(b.rails, verifierDeps, deps.tickMs ? { tickMs: deps.tickMs } : {}));
+  // ADR-0022 (§8.12): confirmation-based EVM evidence is re-checked against `finalized` after success
+  service.addBackground(finalityRecheckTask(b.rails, verifierDeps.evm, deps.tickMs ? { tickMs: deps.tickMs } : {}));
   service.metrics.gauge("executions_inflight", "Executions not yet terminal, by state.", ["state"], async (g) => {
     const rows = await sql<{ state: string; n: string }>`
       select state, count(*)::text as n from executions where terminal_at is null group by state`.execute(

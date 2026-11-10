@@ -1,12 +1,17 @@
 /**
  * EVM destination watcher (lld/rails.md §8.7), one leader-elected loop per watched Tier-A chain.
- * Scans `finalized` blocks for ERC-20 `Transfer` logs to watched recipients and attributes them by
- * exact amount (tag). Demand-driven: while no live execution is in flight to the chain the watcher
- * makes no RPC call at all (nothing could be attributed) and forgets its cursor; when demand returns
- * it starts at the finalized head. An idle stack puts no load on public RPCs. Native assets are not log-visible (the verifier handles them).
+ * Scans counted blocks for ERC-20 `Transfer` logs to watched recipients and attributes them by exact amount (tag).
+ * Counted = the chain's confirmation policy (ADR-0022): up to the `finalized` tag (Ethereum), or up to
+ * `latest − blocks + 1` (Base, Arbitrum: L2 block confirmations). Under a confirmations policy each attributed log's
+ * receipt is re-read and must still be in the log's block with status 1 (reorg check); otherwise nothing settles and
+ * the cursor stops before that block so it is scanned again. Evidence is then `confirmed` (with `confirmations` and
+ * `block_hash`) and the post-success `finalized` re-check follows (§8.12). Demand-driven: while no live execution is
+ * in flight to the chain the watcher makes no RPC call at all (nothing could be attributed) and forgets its cursor;
+ * when demand returns it starts at the counted head. An idle stack puts no load on public RPCs. Native assets are not log-visible (the verifier handles them).
  */
 import { minOf } from "@nearpay-internal/money";
 import type { Rails } from "../../app/context.js";
+import { confirmationsOf, countedHead, FINALIZED } from "../../domain/chains/evm.js";
 import { type EvmRpc, erc20Transfers } from "../../infra/clients/evm.js";
 import { clearCursor, readCursor, writeCursor } from "../cursors.js";
 import { matchCredits } from "../matching.js";
@@ -69,20 +74,25 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
     r.metrics.lag(name, 0);
     return 0;
   }
-  const finalized = await rpc.finalizedBlock();
+  const policy = r.profiles.get(chain)?.evmConfirmation ?? FINALIZED;
+  const latest = policy.kind === "confirmations" ? await rpc.latestBlock() : undefined;
+  const head =
+    latest === undefined
+      ? countedHead(policy, { finalized: await rpc.finalizedBlock() })
+      : countedHead(policy, { latest });
   const stored = await readCursor<{ block: string }>(r, name);
   if (!stored) {
-    await writeCursor(r, name, { block: finalized.toString() });
+    await writeCursor(r, name, { block: head.toString() });
     r.metrics.lag(name, 0);
     return 0;
   }
   const cursor = BigInt(stored.block);
-  if (cursor >= finalized) {
+  if (cursor >= head) {
     r.metrics.lag(name, 0);
     return 0;
   }
   const from = cursor + 1n;
-  const to = minOf(from + WINDOW - 1n, finalized);
+  const to = minOf(from + WINDOW - 1n, head);
   const credits: Credit[] = [];
   for (let i = 0; i < d.recipients.length; i += CHUNK) {
     const logs = await rpc.logs({
@@ -95,6 +105,7 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
       for (const t of erc20Transfers([l])) {
         const assetId = d.contracts.get(t.token);
         if (!assetId) continue;
+        const block = BigInt(l.blockNumber);
         credits.push({
           chain,
           kind: "amount",
@@ -104,17 +115,43 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
           amount: t.amount,
           memo: null,
           txHash: l.transactionHash,
-          blockRef: BigInt(l.blockNumber).toString(),
+          blockRef: block.toString(),
           logRef: `${BigInt(l.logIndex)}`,
+          blockHash: l.blockHash,
+          details: {
+            block_hash: l.blockHash,
+            ...(latest !== undefined && policy.kind === "confirmations"
+              ? { confirmations: Number(confirmationsOf(latest, block)), required_confirmations: policy.blocks }
+              : {}),
+          },
         });
       }
     }
   }
+  // lowest block whose attributed log failed the reorg check: the cursor stops before it (rescanned next step)
+  let reorgedAt: bigint | null = null;
   await matchCredits(r, credits, {
     livemode: true,
     source: "watcher",
-    finality: "finalized",
+    finality: policy.kind === "confirmations" ? "confirmed" : "finalized",
     confirm: async (c) => {
+      if (policy.kind === "confirmations") {
+        // reorg check (ADR-0022): the receipt must still be in the log's block, with status 1
+        const again = await rpc.receipt(c.txHash);
+        if (
+          again?.status !== "0x1" ||
+          again.blockHash.toLowerCase() !== c.blockHash?.toLowerCase() ||
+          BigInt(again.blockNumber).toString() !== c.blockRef
+        ) {
+          const block = BigInt(c.blockRef);
+          r.log.warn(
+            { chain, tx: c.txHash, block: c.blockRef, block_hash: c.blockHash, now: again?.blockHash ?? null },
+            "EVM transfer reorganised before confirmation; rescanning",
+          );
+          reorgedAt = reorgedAt === null || block < reorgedAt ? block : reorgedAt;
+          return false;
+        }
+      }
       // large amounts: a second provider must return the same receipt (§10 agreement)
       if (rpc.urls.length < 2 || c.amount === 0n) return true;
       const x = await r.db
@@ -131,7 +168,8 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
       return other?.status === "0x1" && BigInt(other.blockNumber).toString() === c.blockRef;
     },
   });
-  await writeCursor(r, name, { block: to.toString() });
-  r.metrics.lag(name, Number(finalized - to));
-  return Number(to - from + 1n);
+  const done: bigint = reorgedAt === null ? to : (reorgedAt as bigint) - 1n;
+  await writeCursor(r, name, { block: done.toString() });
+  r.metrics.lag(name, Number(head - done));
+  return Number(done - from + 1n);
 }

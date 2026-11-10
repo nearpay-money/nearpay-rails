@@ -1,7 +1,7 @@
 /**
  * EVM JSON-RPC pool (lld/rails.md §8.7, §8.8, §10: ≥ 2 providers per chain, failover, agreement for
- * large amounts). Only the reads rails needs: the `finalized` head, ERC-20 Transfer logs, receipts
- * and transactions.
+ * large amounts). Only the reads rails needs: the `finalized` and `latest` heads (ADR-0022), ERC-20 Transfer logs,
+ * receipts and transactions.
  */
 
 export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -40,6 +40,8 @@ export class RpcUnavailable extends Error {
 export interface EvmRpc {
   readonly urls: readonly string[];
   finalizedBlock(): Promise<bigint>;
+  /** The `latest` head (confirmation counting, ADR-0022). */
+  latestBlock(): Promise<bigint>;
   logs(q: {
     fromBlock: bigint;
     toBlock: bigint;
@@ -91,6 +93,11 @@ export function evmRpc(o: { urls: readonly string[]; fetch?: typeof fetch; timeo
       const b = (await call("eth_getBlockByNumber", ["finalized", false])) as { number?: string } | null;
       if (!b?.number) throw new RpcUnavailable("no finalized block");
       return BigInt(b.number);
+    },
+    async latestBlock() {
+      const n = (await call("eth_blockNumber", [])) as string | null;
+      if (typeof n !== "string" || !/^0x[0-9a-f]+$/i.test(n)) throw new RpcUnavailable("no latest block");
+      return BigInt(n);
     },
     async logs(q) {
       if (q.addresses.length === 0 || q.recipients.length === 0) return [];

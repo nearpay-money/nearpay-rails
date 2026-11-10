@@ -2,6 +2,7 @@
 import { NearAccountId } from "@nearpay/spec";
 import { baseConfigShape, list, loadConfig, secret, url } from "@nearpay-internal/service";
 import { z } from "zod";
+import { type EvmConfirmation, parseEvmConfirmation } from "./domain/chains/evm.js";
 
 const json = <T extends z.ZodType>(schema: T, fallback: string) =>
   z
@@ -21,6 +22,19 @@ const json = <T extends z.ZodType>(schema: T, fallback: string) =>
 const bps = z.int().min(0).max(10_000);
 const nearAccount = z.string().refine((s) => NearAccountId.safeParse(s).success, "must be a NEAR account id");
 const rpcList = list(url(["https:", "http:"]));
+/** `finalized` or a block count (ADR-0022); unset → the chain profile's rule. Invalid values fail the boot. */
+const evmConfirmation = z
+  .string()
+  .optional()
+  .transform((s, ctx): EvmConfirmation | undefined => {
+    if (s === undefined || s.trim() === "") return undefined;
+    try {
+      return parseEvmConfirmation(s);
+    } catch (e) {
+      ctx.addIssue({ code: "custom", message: e instanceof Error ? e.message : String(e) });
+      return z.NEVER;
+    }
+  });
 
 const shared = {
   ...baseConfigShape,
@@ -120,6 +134,16 @@ const shared = {
   evmRpcUrls_8453: rpcList.default(["https://mainnet.base.org", "https://base-rpc.publicnode.com"]),
   evmRpcUrls_42161: rpcList.default(["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"]),
   /**
+   * EVM evidence rule overrides (`NP_EVM_CONFIRMATIONS_<CHAINID>` = `finalized` | N blocks, ADR-0022). Defaults come
+   * from config/chains.yaml: Base 10 and Arbitrum 40 L2 block confirmations, Ethereum `finalized`.
+   */
+  evmConfirmations_1: evmConfirmation,
+  evmConfirmations_8453: evmConfirmation,
+  evmConfirmations_42161: evmConfirmation,
+  /** Post-success `finalized` re-check of confirmation-based EVM evidence (§8.12): window and cadence. */
+  finalityRecheckWindowS: z.coerce.number().int().min(600).max(86_400).default(7200),
+  finalityRecheckIntervalS: z.coerce.number().int().min(5).max(3600).default(60),
+  /**
    * Stage 4 (§21.4): Solana RPC pool (≥ 2 recommended: the public endpoint + an owner-provided provider). Empty →
    * Solana is Tier B (provider-attested within `NP_TIER_B_LIMITS`) and its watcher is off.
    */
@@ -150,6 +174,15 @@ export const readApiConfig = () => loadConfig(apiShape);
 export const readTrackerConfig = () => loadConfig(trackerShape);
 export const readFeedsConfig = () => loadConfig(feedsShape);
 export const readOpsConfig = () => loadConfig(opsShape);
+
+/** EVM evidence rule overrides by chain (`NP_EVM_CONFIRMATIONS_<CHAINID>`, ADR-0022). */
+export function evmConfirmationOverrides(c: SharedConfig): Record<string, EvmConfirmation | undefined> {
+  return {
+    "eip155:1": c.evmConfirmations_1,
+    "eip155:8453": c.evmConfirmations_8453,
+    "eip155:42161": c.evmConfirmations_42161,
+  };
+}
 
 /** EVM RPC pools by chain (`NP_EVM_RPC_URLS_<CHAINID>`). */
 export function evmRpcUrls(c: SharedConfig): Record<string, readonly string[]> {
