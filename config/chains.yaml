@@ -2,23 +2,27 @@
 #
 # A chain listed here is a chain NearPay routes to and from. Stage 1 verifies Tier A chains
 # independently (NEAR, Ethereum, Base, Arbitrum: indexer/watchers/verifier, ADR-0012); Tier B chains
-# settle on the provider's word within NP_TIER_B_LIMITS. Values:
+# settle on the provider's word within NP_TIER_B_LIMITS. Confirmation (owner decision 2026-11-10 17:10, ADR-0022 as
+# amended): one block of each chain's own consensus — EVM 1 block, Solana `confirmed`, Bitcoin family 1 confirmation,
+# NEAR `final` (Doomslug: the block plus one) — each followed by a post-success re-check (rails §8.12). Values:
 #   blockchain              1Click `blockchain` code
 #   tier                    A | B
 #   min_deadline_s          shortest deposit window offered (payments hides slower routes, FR-PAY-05)
 #   default_deadline_s      deposit window of a new execution (capped by the session expiry)
-#   finality                evidence rule as text (near: final, bitcoin: confirmations); for EVM chains the spec
-#                           view shows the effective evm_confirmation instead
-#   evm_confirmation        EVM evidence rule (ADR-0022): {kind: finalized} (block ≤ `finalized` tag) or
-#                           {kind: confirmations, blocks: N} (latest − block + 1 ≥ N on the chain itself, receipt
-#                           re-read in the same block, then a post-success `finalized` re-check, rails §8.12).
+#   finality                evidence rule as text (near: final, solana: confirmed commitment, bitcoin: 1 confirmation);
+#                           for EVM chains the spec view shows the effective evm_confirmation instead
+#   evm_confirmation        EVM evidence rule (ADR-0022 as amended 2026-11-10 17:10): ONE block of the chain's own
+#                           `latest` head on every EVM chain ({kind: confirmations, blocks: 1}; receipt status 1,
+#                           re-read in the same block right before the evidence applies, then a post-success
+#                           `finalized` re-check, rails §8.12). {kind: finalized} or N blocks remain available.
 #                           Override per chain with NP_EVM_CONFIRMATIONS_<CHAINID> = finalized | N.
 #   verification_timeout_s  provider SUCCESS → evidence deadline, then `held` (rails §8.8). Kept long enough for
 #                           an override back to `finalized` (L2 `finalized` follows L1 finality, ~15–20 min).
 #   watcher                 destination watcher runs for this chain (EVM ERC-20 logs; Solana signatures; Bitcoin
 #                           Esplora signals)
-#   watch_interval_s        watcher cadence (2 s L2, 12 s L1, 4 s Solana, 60 s Bitcoin)
-#   confirmation_tiers      confirmations by settlement USD value (Bitcoin, §21.1), last tier unbounded
+#   watch_interval_s        watcher cadence while something is in flight (1 s L2, 3 s Ethereum, 2 s Solana, 30 s Bitcoin)
+#   confirmation_tiers      Bitcoin family: confirmations by settlement USD value (§21.1), last tier unbounded.
+#                           Absent = 1 confirmation for every amount (ADR-0022 as amended); set it to require more.
 #   memo_mode               none | required (memo chains are not supported as destinations)
 chains:
   - chain: near:mainnet
@@ -35,78 +39,83 @@ chains:
     tier: A
     min_deadline_s: 600
     default_deadline_s: 1800
-    finality: finalized
+    finality: 1 confirmation
     verification_timeout_s: 2700
     watcher: true
-    watch_interval_s: 12
-    evm_confirmation: { kind: finalized }
+    watch_interval_s: 3
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:8453
     blockchain: base
     tier: A
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: 10 confirmations
+    finality: 1 confirmation
     verification_timeout_s: 3600
     watcher: true
-    watch_interval_s: 2
-    evm_confirmation: { kind: confirmations, blocks: 10 }
+    watch_interval_s: 1
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:42161
     blockchain: arb
     tier: A
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: 40 confirmations
+    finality: 1 confirmation
     verification_timeout_s: 3600
     watcher: true
-    watch_interval_s: 2
-    evm_confirmation: { kind: confirmations, blocks: 40 }
+    watch_interval_s: 1
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:10
     blockchain: op
     tier: B
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 1 confirmation
     verification_timeout_s: 1800
     watcher: false
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:137
     blockchain: pol
     tier: B
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 1 confirmation
     verification_timeout_s: 1800
     watcher: false
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:56
     blockchain: bsc
     tier: B
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 1 confirmation
     verification_timeout_s: 1800
     watcher: false
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:43114
     blockchain: avax
     tier: B
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 1 confirmation
     verification_timeout_s: 1800
     watcher: false
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   - chain: eip155:100
     blockchain: gnosis
     tier: B
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 1 confirmation
     verification_timeout_s: 1800
     watcher: false
+    evm_confirmation: { kind: confirmations, blocks: 1 }
     memo_mode: none
   # Stage 4 (§21): Tier A when NP_SOLANA_RPC_URLS is set (else Tier B at boot, alert tier_a_degraded)
   - chain: solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp
@@ -114,33 +123,29 @@ chains:
     tier: A
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: "solana: finalized commitment"
+    finality: "solana: confirmed commitment"
     verification_timeout_s: 1800
     watcher: true
-    watch_interval_s: 4
+    watch_interval_s: 2
     memo_mode: none
-  # Stage 4 (§21): Tier A when NP_BITCOIN_ESPLORA_URLS is set; the watcher only nudges the poller (BTC is untagged)
+  # Stage 4 (§21): Tier A when NP_BITCOIN_ESPLORA_URLS is set; the watcher only nudges the poller / verifier (BTC is
+  # untagged). 1 confirmation for every amount (add confirmation_tiers here to require more above a USD value)
   - chain: bip122:000000000019d6689c085ae165831e93
     blockchain: btc
     tier: A
     min_deadline_s: 3600
     default_deadline_s: 7200
-    finality: "bitcoin: 1 confirmation below USD 1,000, else 2"
+    finality: "bitcoin: 1 confirmation"
     verification_timeout_s: 7200
     watcher: true
-    watch_interval_s: 60
+    watch_interval_s: 30
     memo_mode: none
-    confirmation_tiers:
-      - below_usd_micros: 1000000000
-        confirmations: 1
-      - below_usd_micros: null
-        confirmations: 2
   - chain: bip122:12a765e31ffd4059bada1e25190f6e98
     blockchain: ltc
     tier: B
     min_deadline_s: 1800
     default_deadline_s: 3600
-    finality: 6 confirmations
+    finality: 1 confirmation
     verification_timeout_s: 5400
     watcher: false
     memo_mode: none
@@ -149,7 +154,7 @@ chains:
     tier: B
     min_deadline_s: 1800
     default_deadline_s: 3600
-    finality: 6 confirmations
+    finality: 1 confirmation
     verification_timeout_s: 5400
     watcher: false
     memo_mode: none

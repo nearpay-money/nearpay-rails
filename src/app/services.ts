@@ -137,6 +137,7 @@ export function chainPools(config: SharedConfig, r: Rails, f?: typeof fetch) {
   const solana: SolanaRpc | null = config.solanaRpcUrls.length
     ? solanaRpc({
         urls: config.solanaRpcUrls,
+        commitment: config.solanaCommitment,
         now: r.now,
         onCall: (o) => r.metrics.chainRpcCall(SOLANA_MAINNET, o),
         ...(f ? { fetch: f } : {}),
@@ -259,7 +260,16 @@ function build(config: SharedConfig, deps: ServiceDeps, app: string, poolMax?: n
     awaitingSweepS: config.awaitingSweepS,
     screeningFailClosedUsdMicros: usdMicros(config.screeningFailClosedUsd),
     agreementUsdMicros: usdMicros(config.agreementUsd),
-    finalityRecheck: { windowS: config.finalityRecheckWindowS, intervalS: config.finalityRecheckIntervalS },
+    finalityRecheck: {
+      windowS: config.finalityRecheckWindowS,
+      intervalS: config.finalityRecheckIntervalS,
+      solana: { windowS: config.finalityRecheckSolanaWindowS, intervalS: config.finalityRecheckSolanaIntervalS },
+      bitcoin: {
+        windowS: config.finalityRecheckBitcoinWindowS,
+        intervalS: config.finalityRecheckBitcoinIntervalS,
+        confirmations: config.finalityRecheckBitcoinConfirmations,
+      },
+    },
     vault: { live: config.vaultContract ?? null, test: config.testVaultContract },
     random: deps.random ?? Math.random,
     now: deps.now ?? Date.now,
@@ -358,8 +368,8 @@ export function createTracker(config: TrackerConfig, deps: TrackerDeps = {}): { 
   };
   service.addBackground(pollerTask(b.rails, deps.tickMs ? { tickMs: deps.tickMs } : {}));
   service.addBackground(verifierTask(b.rails, verifierDeps, deps.tickMs ? { tickMs: deps.tickMs } : {}));
-  // ADR-0022 (§8.12): confirmation-based EVM evidence is re-checked against `finalized` after success
-  service.addBackground(finalityRecheckTask(b.rails, verifierDeps.evm, deps.tickMs ? { tickMs: deps.tickMs } : {}));
+  // ADR-0022 as amended (§8.12): one-block evidence (EVM, Solana, Bitcoin) is re-checked at finality after success
+  service.addBackground(finalityRecheckTask(b.rails, verifierDeps, deps.tickMs ? { tickMs: deps.tickMs } : {}));
   service.metrics.gauge("executions_inflight", "Executions not yet terminal, by state.", ["state"], async (g) => {
     const rows = await sql<{ state: string; n: string }>`
       select state, count(*)::text as n from executions where terminal_at is null group by state`.execute(

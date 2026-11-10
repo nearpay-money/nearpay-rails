@@ -1,13 +1,13 @@
 /**
  * EVM destination watcher (lld/rails.md §8.7), one leader-elected loop per watched Tier-A chain.
  * Scans counted blocks for ERC-20 `Transfer` logs to watched recipients and attributes them by exact amount (tag).
- * Counted = the chain's confirmation policy (ADR-0022): up to the `finalized` tag (Ethereum), or up to
- * `latest − blocks + 1` (Base, Arbitrum: L2 block confirmations). Under a confirmations policy each attributed log's
+ * Counted = the chain's confirmation policy (ADR-0022 as amended 2026-11-10 17:10): by default one block on every EVM
+ * chain (up to `latest`); `latest − blocks + 1` or the `finalized` tag by override. Under a confirmations policy each attributed log's
  * receipt is re-read and must still be in the log's block with status 1 (reorg check); otherwise nothing settles and
  * the cursor stops before that block so it is scanned again. Evidence is then `confirmed` (with `confirmations` and
  * `block_hash`) and the post-success `finalized` re-check follows (§8.12). Demand-driven: while no live execution is
  * in flight to the chain the watcher makes no RPC call at all (nothing could be attributed) and forgets its cursor;
- * when demand returns it starts at the counted head. An idle stack puts no load on public RPCs. Native assets are not log-visible (the verifier handles them).
+ * when demand returns it starts {@link FIRST_SIGHT_MARGIN} blocks below the counted head. An idle stack puts no load on public RPCs. Native assets are not log-visible (the verifier handles them).
  */
 import { minOf } from "@nearpay-internal/money";
 import type { Rails } from "../../app/context.js";
@@ -18,6 +18,13 @@ import { matchCredits } from "../matching.js";
 import type { Credit } from "../near-indexer/parse.js";
 
 const WINDOW = 500n;
+/**
+ * First sight of demand starts this many blocks below the counted head. Under the one-block rule (ADR-0022 as
+ * amended) the counted head is `latest` itself, so a payout mined in the block the watcher first sees (leader just
+ * elected, demand just appeared) would otherwise be skipped; rescanning a few blocks is cheap and matching is
+ * idempotent (the old 10/40-block and `finalized` rules left this margin implicitly).
+ */
+export const FIRST_SIGHT_MARGIN = 10n;
 const CHUNK = 500;
 
 interface Demand {
@@ -68,8 +75,8 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
   const name = `evm:${chain}`;
   const d = await demand(r, chain);
   if (!d) {
-    // idle: no RPC call at all; when demand returns the scan starts at the then-finalized head
-    // (a payout to a new execution can only land in later blocks)
+    // idle: no RPC call at all; when demand returns the scan starts a few blocks below the then-counted head
+    // (a payout to a new execution can only land in later blocks; the margin covers a just-elected leader)
     await clearCursor(r, name);
     r.metrics.lag(name, 0);
     return 0;
@@ -82,8 +89,9 @@ export async function watchOnce(r: Rails, chain: string, rpc: EvmRpc): Promise<n
       : countedHead(policy, { latest });
   const stored = await readCursor<{ block: string }>(r, name);
   if (!stored) {
-    await writeCursor(r, name, { block: head.toString() });
-    r.metrics.lag(name, 0);
+    const start = head > FIRST_SIGHT_MARGIN ? head - FIRST_SIGHT_MARGIN : 0n;
+    await writeCursor(r, name, { block: start.toString() });
+    r.metrics.lag(name, Number(head - start));
     return 0;
   }
   const cursor = BigInt(stored.block);

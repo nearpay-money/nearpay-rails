@@ -1,6 +1,8 @@
 /**
- * Solana JSON-RPC pool (lld/rails.md §21.2–§21.4): `getSignaturesForAddress` and `getTransaction` at `finalized`
- * commitment, `jsonParsed`, `maxSupportedTransactionVersion: 0`. 3 s timeout, hedged reads, 429 → back off ×2.
+ * Solana JSON-RPC pool (lld/rails.md §21.2–§21.4): `getSignaturesForAddress` and `getTransaction` at `confirmed`
+ * commitment (the slot was voted on by a supermajority — Solana's one-block confirmation; ADR-0022 as amended
+ * 2026-11-10 17:10; `processed` is never used), `jsonParsed`, `maxSupportedTransactionVersion: 0`. The post-success
+ * re-check (§8.12) reads `getTransaction` and `getSlot` at `finalized`. 3 s timeout, hedged reads, 429 → back off ×2.
  */
 import { z } from "zod";
 import type { SolanaTx } from "../../domain/chains/solana.js";
@@ -13,15 +15,27 @@ export interface SignatureInfo {
   readonly blockTime: number | null;
 }
 
+/** Commitments rails reads at: `confirmed` for evidence, `finalized` for the post-success re-check (§8.12). */
+export type SolanaCommitment = "confirmed" | "finalized";
+
 export interface SolanaRpc {
   readonly urls: readonly string[];
-  /** Newest first, `finalized`; `until`/`before` are signatures (exclusive). */
+  /** Commitment `signatures` and `transaction` read at (evidence): `confirmed` unless `NP_SOLANA_COMMITMENT` says so. */
+  readonly commitment: SolanaCommitment;
+  /** Newest first, at the evidence commitment (`confirmed`); `until`/`before` are signatures (exclusive). */
   signatures(
     address: string,
     o: { until?: string | null; before?: string | null; limit: number },
   ): Promise<SignatureInfo[]>;
-  /** null = not found or not finalized yet. `urlIndex` reads one specific endpoint (agreement). */
+  /**
+   * At the evidence commitment (`confirmed`): null = not found or not confirmed yet. `urlIndex` reads one specific
+   * endpoint (agreement).
+   */
   transaction(signature: string, urlIndex?: number): Promise<SolanaTx | null>;
+  /** The transaction at an explicit commitment (§8.12 re-check reads `finalized`); null = not found at it. */
+  transactionAt(signature: string, commitment: SolanaCommitment): Promise<SolanaTx | null>;
+  /** The newest slot at `commitment` (`getSlot`). */
+  slot(commitment: SolanaCommitment): Promise<number>;
   health(): PoolHealthView;
 }
 
@@ -71,7 +85,10 @@ export function solanaRpc(o: {
   hedgeMs?: number;
   now?: () => number;
   onCall?: (outcome: "ok" | "error" | "rate_limited") => void;
+  /** Evidence commitment (default `confirmed`, ADR-0022 as amended); `finalized` restores the pre-amendment rule. */
+  commitment?: SolanaCommitment;
 }): SolanaRpc {
+  const evidence: SolanaCommitment = o.commitment ?? "confirmed";
   const f = o.fetch ?? fetch;
   const pool = endpointPool({
     urls: o.urls,
@@ -96,9 +113,9 @@ export function solanaRpc(o: {
     }
     return body.result ?? null;
   };
-  const txParams = (sig: string) => [
+  const txParams = (sig: string, commitment: SolanaCommitment) => [
     sig,
-    { commitment: "finalized", encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
+    { commitment, encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
   ];
   const parseTx = (raw: unknown): SolanaTx | null => {
     if (raw === null) return null;
@@ -108,8 +125,9 @@ export function solanaRpc(o: {
   };
   return {
     urls: o.urls,
+    commitment: evidence,
     async signatures(address, q) {
-      const cfg: Record<string, unknown> = { commitment: "finalized", limit: q.limit };
+      const cfg: Record<string, unknown> = { commitment: evidence, limit: q.limit };
       if (q.until) cfg.until = q.until;
       if (q.before) cfg.before = q.before;
       const raw = await pool.run(rpc("getSignaturesForAddress", [address, cfg]));
@@ -123,8 +141,17 @@ export function solanaRpc(o: {
       }));
     },
     async transaction(sig, urlIndex) {
-      const call = rpc("getTransaction", txParams(sig));
+      const call = rpc("getTransaction", txParams(sig, evidence));
       return parseTx(urlIndex === undefined ? await pool.run(call) : await pool.one(urlIndex, call));
+    },
+    async transactionAt(sig, commitment) {
+      return parseTx(await pool.run(rpc("getTransaction", txParams(sig, commitment))));
+    },
+    async slot(commitment) {
+      const raw = await pool.run(rpc("getSlot", [{ commitment }]));
+      if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0)
+        throw new PoolUnavailable("getSlot: unexpected result");
+      return raw;
     },
     health: pool.health,
   };

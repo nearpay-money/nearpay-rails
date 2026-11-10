@@ -107,7 +107,7 @@ describe("endpoint pool", () => {
 
 describe("Solana RPC client", () => {
   const tx = V.evidence.solana.cases[0].rpc_result;
-  it("reads finalized transactions and signatures; null for unknown; errors and 429s", async () => {
+  it("reads transactions and signatures at `confirmed` (ADR-0022 as amended); null for unknown; errors and 429s", async () => {
     const bodies: Any[] = [];
     const rpc = solanaRpc({
       urls: ["http://a", "http://b"],
@@ -125,15 +125,41 @@ describe("Solana RPC client", () => {
     });
     expect((await rpc.transaction("known"))?.slot).toBe(380000001);
     expect(await rpc.transaction("unknown", 1)).toBeNull();
+    expect(rpc.commitment).toBe("confirmed");
     expect(bodies[0].params[1]).toEqual({
-      commitment: "finalized",
+      commitment: "confirmed",
       encoding: "jsonParsed",
       maxSupportedTransactionVersion: 0,
     });
     const sigs = await rpc.signatures("acct", { until: "u", before: "b", limit: 7 });
     expect(sigs).toEqual([{ signature: "s".repeat(64), slot: 5, err: null, blockTime: null }]);
-    expect(bodies.at(-1).params[1]).toEqual({ commitment: "finalized", limit: 7, until: "u", before: "b" });
+    expect(bodies.at(-1).params[1]).toEqual({ commitment: "confirmed", limit: 7, until: "u", before: "b" });
+    // the §8.12 re-check reads explicitly at `finalized`; `processed` is never sent
+    await rpc.transactionAt("known", "finalized");
+    expect(bodies.at(-1).params[1]).toMatchObject({ commitment: "finalized" });
+    expect(bodies.some((b) => JSON.stringify(b.params).includes("processed"))).toBe(false);
     expect(rpc.health().failingSinceMs).toBeNull();
+  });
+
+  it("getSlot at a commitment; `commitment: finalized` restores the pre-amendment evidence rule", async () => {
+    const bodies: Any[] = [];
+    const rpc = solanaRpc({
+      urls: ["http://a"],
+      commitment: "finalized",
+      fetch: (async (_url: string, init: RequestInit) => {
+        const b = JSON.parse(init.body as string);
+        bodies.push(b);
+        if (b.method === "getSlot") return json({ result: 380000123 });
+        return json({ result: null });
+      }) as typeof fetch,
+    });
+    expect(rpc.commitment).toBe("finalized");
+    expect(await rpc.slot("finalized")).toBe(380000123);
+    expect(bodies[0]).toMatchObject({ method: "getSlot", params: [{ commitment: "finalized" }] });
+    expect(await rpc.transaction("x")).toBeNull();
+    expect(bodies[1].params[1]).toMatchObject({ commitment: "finalized" });
+    const bad = solanaRpc({ urls: ["http://a"], fetch: (async () => json({ result: "x" })) as typeof fetch });
+    await expect(bad.slot("confirmed")).rejects.toThrow("getSlot");
   });
 
   it("refuses malformed results and JSON-RPC errors", async () => {

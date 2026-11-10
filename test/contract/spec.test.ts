@@ -175,7 +175,10 @@ describe("Stage 4 contract (spec 0.4.0, lld/rails.md §21, §8.6)", () => {
       expect(view).toMatchObject({
         chain: want.chain,
         explorer_address_url: want.explorer_address_url,
-        confirmation_tiers: want.confirmation_tiers,
+        // ADR-0022 as amended (owner 2026-11-10 17:10): Bitcoin needs 1 confirmation for every amount; the spec 0.4.0
+        // vector still carries the Stage 4 USD tiers (spec follow-up). The schema accepts both.
+        confirmation_tiers:
+          view.family === "bitcoin" ? [{ below_usd_micros: null, confirmations: 1 }] : want.confirmation_tiers,
       });
     }
     for (const p of profiles.all()) expect(() => ChainProfile.parse(profiles.view(p))).not.toThrow();
