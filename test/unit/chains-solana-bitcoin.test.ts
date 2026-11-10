@@ -1,7 +1,8 @@
-/** Solana and Bitcoin parsing against the spec vectors (lld/rails.md §21, spec 0.4.0 `chains-solana-bitcoin.json`). */
+/** Solana and Bitcoin parsing against the spec vectors (lld/rails.md §21, spec 0.4.2 `chains-solana-bitcoin.json`). */
 
 import {
   BITCOIN_CONFIRMATION_TIERS,
+  BITCOIN_DEFAULT_CONFIRMATION_TIERS,
   BitcoinEvidence,
   parseOmftAssetId,
   requiredConfirmations,
@@ -31,6 +32,7 @@ import {
   splAssetId,
   TOKEN_PROGRAM,
 } from "../../src/domain/chains/solana.js";
+import { ONE_CONFIRMATION } from "../../src/domain/token-registry/chain-profiles.js";
 import { specVector } from "../support/vectors.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: vector JSON
@@ -213,9 +215,16 @@ describe("Bitcoin scripts and addresses", () => {
 });
 
 describe("Bitcoin evidence (vector cases)", () => {
-  it("confirmation tiers", () => {
-    expect(V.evidence.bitcoin.tiers).toEqual(BITCOIN_CONFIRMATION_TIERS);
+  it("confirmation tiers: 1 for every amount by default; the Stage 4 USD tiers as an opt-in override", () => {
+    const tiers = V.evidence.bitcoin.tiers;
+    expect(tiers).toEqual(BITCOIN_DEFAULT_CONFIRMATION_TIERS);
+    expect(tiers).toEqual(ONE_CONFIRMATION);
     for (const c of V.evidence.bitcoin.required_confirmations)
+      expect(requiredConfirmations(tiers, BigInt(c.usd_micros))).toBe(c.confirmations);
+    expect(maxConfirmations(tiers)).toBe(1);
+    expect(confirmationsRequired(tiers, null)).toBe(1);
+    expect(V.evidence.bitcoin.override_tiers).toEqual(BITCOIN_CONFIRMATION_TIERS);
+    for (const c of V.evidence.bitcoin.override_required_confirmations)
       expect(requiredConfirmations(BITCOIN_CONFIRMATION_TIERS, BigInt(c.usd_micros))).toBe(c.confirmations);
     expect(maxConfirmations(BITCOIN_CONFIRMATION_TIERS)).toBe(2);
     expect(confirmationsRequired(BITCOIN_CONFIRMATION_TIERS, null)).toBe(2);
@@ -224,7 +233,7 @@ describe("Bitcoin evidence (vector cases)", () => {
 
   for (const c of V.evidence.bitcoin.cases as Any[]) {
     it(c.name, () => {
-      const required = confirmationsRequired(BITCOIN_CONFIRMATION_TIERS, BigInt(c.settlement_usd_micros));
+      const required = confirmationsRequired(V.evidence.bitcoin.tiers, BigInt(c.settlement_usd_micros));
       const r = checkBitcoinTransfer(c.esplora_tx as EsploraTx, c.tip_height, {
         address: "bc1qgjvrfv789jcls63y95cgan53lq88jnuh32w0fq",
         expected: BigInt(c.expected_amount),

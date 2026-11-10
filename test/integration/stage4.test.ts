@@ -695,14 +695,19 @@ describe("tiers (§21.4)", () => {
   it("the chain profiles route carries the Stage 4 fields", async () => {
     const r = await s.call("GET", "/internal/chain-profiles");
     const p = (r.body as { profiles: Any[] }).profiles;
+    // ADR-0022 as amended: one block of each chain's own consensus — the spec 0.4.2 vector profiles
+    const want = (chain: string) => (V.chains as Any[]).find((x) => x.chain === chain);
     expect(p.find((x) => x.chain === BITCOIN)).toMatchObject({
       tier: "A",
       explorer_address_url: "https://mempool.space/address/{address}",
-      // ADR-0022 as amended: 1 confirmation for every amount (the spec 0.4.0 vector still lists the USD tiers)
-      finality: "bitcoin: 1 confirmation",
-      confirmation_tiers: [{ below_usd_micros: null, confirmations: 1 }],
+      finality: want(BITCOIN).finality,
+      confirmation_tiers: want(BITCOIN).confirmation_tiers,
     });
-    expect(p.find((x) => x.chain === SOLANA)).toMatchObject({ finality: "solana: confirmed commitment" });
+    expect(want(BITCOIN).confirmation_tiers).toEqual([{ below_usd_micros: null, confirmations: 1 }]);
+    expect(p.find((x) => x.chain === SOLANA)).toMatchObject({
+      finality: want(SOLANA).finality,
+      confirmation_tiers: want(SOLANA).confirmation_tiers,
+    });
     for (const x of p.filter((y) => y.family === "evm")) expect(x.finality).toBe("1 confirmation");
   });
 });
