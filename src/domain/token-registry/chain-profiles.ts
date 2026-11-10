@@ -7,6 +7,13 @@
 import type { ConfirmationTier } from "@nearpay/spec";
 import { type ChainInfo, getChain } from "@nearpay-internal/chains";
 import { z } from "zod";
+import {
+  DEFAULT_EVM_CONFIRMATION,
+  type EvmConfirmation,
+  FINALIZED,
+  MAX_CONFIRMATIONS,
+  policyLabel,
+} from "../chains/evm.js";
 
 export const ChainProfileInput = z.object({
   chain: z.string().regex(/^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/),
@@ -28,6 +35,16 @@ export const ChainProfileInput = z.object({
       }),
     )
     .min(1)
+    .optional(),
+  /**
+   * EVM evidence rule (ADR-0022): `{kind: finalized}` or `{kind: confirmations, blocks}` (L2 block confirmations).
+   * Absent → the chain's default (Base 10, Arbitrum 40 confirmations; others `finalized`). EVM chains only.
+   */
+  evm_confirmation: z
+    .discriminatedUnion("kind", [
+      z.object({ kind: z.literal("finalized") }),
+      z.object({ kind: z.literal("confirmations"), blocks: z.int().min(1).max(MAX_CONFIRMATIONS) }),
+    ])
     .optional(),
 });
 
@@ -65,6 +82,8 @@ export interface ChainProfile {
   readonly explorerAddressUrl: string;
   /** Stage 4 (spec 0.4.0 `confirmation_tiers`): null for chains with a finality flag. */
   readonly confirmationTiers: readonly ConfirmationTier[] | null;
+  /** EVM evidence rule (ADR-0022); null for non-EVM chains. */
+  readonly evmConfirmation: EvmConfirmation | null;
   /** Tier the profile file declares (before the boot-time pool check, §21.4). */
   readonly configuredTier: "A" | "B";
   readonly info: ChainInfo;
@@ -96,6 +115,8 @@ export function chainProfiles(doc: unknown): ChainProfiles {
     if (info.family === "bitcoin" && p.tier === "A" && !p.confirmation_tiers)
       throw new ProfileError(`chain profile ${p.chain}: a Tier-A Bitcoin chain needs confirmation_tiers`);
     if (p.watcher && p.tier !== "A") throw new ProfileError(`chain profile ${p.chain}: a watched chain is Tier A`);
+    if (p.evm_confirmation && info.family !== "evm")
+      throw new ProfileError(`chain profile ${p.chain}: evm_confirmation is for EVM chains only`);
     out.set(p.chain, {
       chain: p.chain,
       blockchain: p.blockchain,
@@ -111,6 +132,8 @@ export function chainProfiles(doc: unknown): ChainProfiles {
       explorerTxUrl: info.explorer.tx,
       explorerAddressUrl: info.explorer.address,
       confirmationTiers: p.confirmation_tiers ?? null,
+      evmConfirmation:
+        info.family === "evm" ? (p.evm_confirmation ?? DEFAULT_EVM_CONFIRMATION[p.chain] ?? FINALIZED) : null,
       configuredTier: p.tier,
       info,
     });
@@ -150,6 +173,21 @@ export class ChainProfiles {
     }
     return { profiles: new ChainProfiles(out), degraded };
   }
+  /**
+   * Environment overrides of the EVM evidence rule (`NP_EVM_CONFIRMATIONS_<CHAINID>`, ADR-0022), keyed by CAIP-2 chain.
+   * An override for a chain without a profile, or for a non-EVM chain, is refused (fail closed: a typo must not pass).
+   */
+  withEvmConfirmations(overrides: Readonly<Record<string, EvmConfirmation | undefined>>): ChainProfiles {
+    const out = new Map(this.#byChain);
+    for (const [chain, policy] of Object.entries(overrides)) {
+      if (!policy) continue;
+      const p = out.get(chain);
+      if (!p) throw new ProfileError(`EVM confirmation override for ${chain}: no chain profile`);
+      if (p.family !== "evm") throw new ProfileError(`EVM confirmation override for ${chain}: not an EVM chain`);
+      out.set(chain, { ...p, evmConfirmation: policy });
+    }
+    return new ChainProfiles(out);
+  }
   /** Spec view (`listChainProfiles`). */
   view(p: ChainProfile) {
     return {
@@ -159,7 +197,8 @@ export class ChainProfiles {
       tier: p.tier,
       min_deadline_s: p.minDeadlineS,
       default_deadline_s: p.defaultDeadlineS,
-      finality: p.finality,
+      // the effective EVM evidence rule (env overrides included); other chains: the profile text
+      finality: p.evmConfirmation ? policyLabel(p.evmConfirmation) : p.finality,
       verification_timeout_s: p.verificationTimeoutS,
       memo_mode: p.memoMode,
       explorer_tx_url: p.explorerTxUrl,

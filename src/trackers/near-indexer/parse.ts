@@ -29,6 +29,9 @@ export interface Credit {
   readonly logRef: string;
   /** spec 0.4.0: chain detail for the evidence (Solana watcher). */
   readonly detail?: EvidenceChainDetail;
+  /** EVM watcher (ADR-0022): the log's block hash (reorg check) and extra verification details (confirmations). */
+  readonly blockHash?: string;
+  readonly details?: Record<string, unknown>;
 }
 
 export interface ReceiptOutcome {

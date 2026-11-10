@@ -7,9 +7,14 @@
 #   tier                    A | B
 #   min_deadline_s          shortest deposit window offered (payments hides slower routes, FR-PAY-05)
 #   default_deadline_s      deposit window of a new execution (capped by the session expiry)
-#   finality                evidence rule (evm: `finalized` block tag, near: final, bitcoin: confirmations)
-#   verification_timeout_s  provider SUCCESS → evidence deadline, then `held` (rails §8.8). L2 `finalized`
-#                           follows L1 finality (~15–20 min), so EVM timeouts allow for it.
+#   finality                evidence rule as text (near: final, bitcoin: confirmations); for EVM chains the spec
+#                           view shows the effective evm_confirmation instead
+#   evm_confirmation        EVM evidence rule (ADR-0022): {kind: finalized} (block ≤ `finalized` tag) or
+#                           {kind: confirmations, blocks: N} (latest − block + 1 ≥ N on the chain itself, receipt
+#                           re-read in the same block, then a post-success `finalized` re-check, rails §8.12).
+#                           Override per chain with NP_EVM_CONFIRMATIONS_<CHAINID> = finalized | N.
+#   verification_timeout_s  provider SUCCESS → evidence deadline, then `held` (rails §8.8). Kept long enough for
+#                           an override back to `finalized` (L2 `finalized` follows L1 finality, ~15–20 min).
 #   watcher                 destination watcher runs for this chain (EVM ERC-20 logs; Solana signatures; Bitcoin
 #                           Esplora signals)
 #   watch_interval_s        watcher cadence (2 s L2, 12 s L1, 4 s Solana, 60 s Bitcoin)
@@ -34,26 +39,29 @@ chains:
     verification_timeout_s: 2700
     watcher: true
     watch_interval_s: 12
+    evm_confirmation: { kind: finalized }
     memo_mode: none
   - chain: eip155:8453
     blockchain: base
     tier: A
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 10 confirmations
     verification_timeout_s: 3600
     watcher: true
     watch_interval_s: 2
+    evm_confirmation: { kind: confirmations, blocks: 10 }
     memo_mode: none
   - chain: eip155:42161
     blockchain: arb
     tier: A
     min_deadline_s: 300
     default_deadline_s: 1800
-    finality: finalized
+    finality: 40 confirmations
     verification_timeout_s: 3600
     watcher: true
     watch_interval_s: 2
+    evm_confirmation: { kind: confirmations, blocks: 40 }
     memo_mode: none
   - chain: eip155:10
     blockchain: op

@@ -8,9 +8,9 @@ import { randomUUID } from "node:crypto";
 import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { Execution } from "@nearpay-internal/spec";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { refreshTokens } from "../../src/app/tokens.js";
-import { evmRpc } from "../../src/infra/clients/evm.js";
+import { type EvmRpc, evmRpc } from "../../src/infra/clients/evm.js";
 import { explorer } from "../../src/infra/clients/explorer.js";
 import { neardata, nearRpc } from "../../src/infra/clients/near.js";
 import { oneClickProvider } from "../../src/providers/oneclick/client.js";
@@ -372,27 +372,39 @@ describe("hot poller on 1Click statuses", () => {
 });
 
 describe("EVM destination watcher (Anvil)", () => {
-  it("attributes a finalized Transfer of exactly base + tag to the execution; other amounts are unattributed", async () => {
-    const rpc = evmRpc({ urls: [anvil.url] });
-    const x = await create(live());
-    await s.admin.db
+  const watch = async (recipient: string) =>
+    s.admin.db
       .insertInto("watched_destinations")
       .values({
         destination_id: randomUUID(),
         account_id: toUuid(ACCOUNT, "acct"),
         livemode: true,
         chain: "eip155:8453",
-        address_norm: x.settlement.recipient,
+        address_norm: recipient,
         asset_id: USDC_BASE,
         type: "chain_address",
         active: true,
         source_version: 1,
       })
       .execute();
-    await watchOnce(s.rails, "eip155:8453", rpc); // starts the cursor at the finalized head
+  const recheckOf = (id: string) =>
+    s.admin.db
+      .selectFrom("executions")
+      .select(["state", "finality_recheck_status", "finality_recheck_block_hash", "finality_recheck_at"])
+      .where("id", "=", toUuid(id, "ex"))
+      .executeTakeFirstOrThrow();
+
+  it("Base: attributes a Transfer of exactly base + tag once it has 10 L2 confirmations (confirmed), then the finalized re-check passes", async () => {
+    const rpc = evmRpc({ urls: [anvil.url] });
+    const x = await create(live());
+    await watch(x.settlement.recipient);
+    await watchOnce(s.rails, "eip155:8453", rpc); // starts the cursor at the counted head (latest − 9)
     const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
     const stray = await anvil.transfer(token, x.settlement.recipient, 12_345n);
-    await anvil.mine(70);
+    await anvil.mine(5); // the payout has 7 confirmations
+    for (let i = 0; i < 3; i++) await watchOnce(s.rails, "eip155:8453", rpc);
+    expect((await get(x.id)).state).toBe("awaiting_deposit"); // not deep enough: not counted yet
+    await anvil.mine(5); // 12 confirmations
     let scanned = 0;
     for (let i = 0; i < 5 && (await get(x.id)).state !== "succeeded"; i++)
       scanned += await watchOnce(s.rails, "eip155:8453", rpc);
@@ -402,13 +414,69 @@ describe("EVM destination watcher (Anvil)", () => {
     expect(done.evidence).toMatchObject({
       source: "watcher",
       tier: "A",
-      finality: "finalized",
+      finality: "confirmed",
       tx_hash: hash,
       chain: "eip155:8453",
       sender: expect.stringMatching(/^0x[0-9a-f]{40}$/), // spec 0.3.0: the Transfer log's `from`
     });
+    const receipt = await anvil.rpc<{ blockHash: string }>("eth_getTransactionReceipt", [hash]);
+    const [v] = await s.admin.db
+      .selectFrom("verifications")
+      .selectAll()
+      .where("execution_id", "=", toUuid(x.id, "ex"))
+      .execute();
+    expect(v).toMatchObject({ result: "pass", finality: "confirmed", source: "watcher" });
+    expect(v?.details).toMatchObject({ block_hash: receipt.blockHash, required_confirmations: 10 });
+    expect((v?.details as { confirmations?: number } | undefined)?.confirmations ?? 0).toBeGreaterThanOrEqual(10);
     const un = await s.admin.db.selectFrom("unattributed_transfers").selectAll().where("tx_hash", "=", stray).execute();
     expect(un.map((u) => [u.amount, u.recipient])).toEqual([["12345", x.settlement.recipient]]);
+
+    // §8.12: the re-check was scheduled; once Anvil's `finalized` (head − 64) covers the block it ends `finalized`
+    expect(await recheckOf(x.id)).toMatchObject({
+      finality_recheck_status: "pending",
+      finality_recheck_block_hash: receipt.blockHash,
+    });
+    await anvil.mine(70);
+    await s.admin.db
+      .updateTable("executions")
+      .set({ finality_recheck_at: new Date() })
+      .where("id", "=", toUuid(x.id, "ex"))
+      .execute();
+    const end = Date.now() + 10_000;
+    while ((await recheckOf(x.id)).finality_recheck_status === "pending" && Date.now() < end)
+      await new Promise((r) => setTimeout(r, 100));
+    expect(await recheckOf(x.id)).toMatchObject({
+      state: "succeeded",
+      finality_recheck_status: "finalized",
+      finality_recheck_at: null,
+    });
+  });
+
+  it("reorg check: a log whose receipt moved to another block settles nothing and is rescanned", async () => {
+    const honest = evmRpc({ urls: [anvil.url] });
+    // a pool whose receipt read disagrees with the log's block hash (the block was reorganised meanwhile)
+    const reorged: EvmRpc = {
+      ...honest,
+      receipt: async (h, i) => {
+        const r = await honest.receipt(h, i);
+        return r ? { ...r, blockHash: `0x${"ee".repeat(32)}` } : r;
+      },
+    };
+    const x = await create(live());
+    await watch(x.settlement.recipient);
+    await watchOnce(s.rails, "eip155:8453", honest);
+    const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
+    const { blockNumber } = await anvil.rpc<{ blockNumber: string }>("eth_getTransactionReceipt", [hash]);
+    await anvil.mine(12);
+    for (let i = 0; i < 3; i++) await watchOnce(s.rails, "eip155:8453", reorged);
+    expect((await get(x.id)).state).toBe("awaiting_deposit");
+    // the cursor stops just before the reorganised block, so the next scan sees the log again
+    expect((await readCursor<{ block: string }>(s.rails, "evm:eip155:8453"))?.block).toBe(
+      (BigInt(blockNumber) - 1n).toString(),
+    );
+    for (let i = 0; i < 3 && (await get(x.id)).state !== "succeeded"; i++)
+      await watchOnce(s.rails, "eip155:8453", honest);
+    expect(await get(x.id)).toMatchObject({ state: "succeeded", evidence: { tx_hash: hash, finality: "confirmed" } });
   });
 
   it("makes no RPC call while nothing is in flight, and restarts at the head when demand returns", async () => {
@@ -430,15 +498,16 @@ describe("EVM destination watcher (Anvil)", () => {
     await create(live());
     await anvil.mine(3);
     expect(await watchOnce(s.rails, "eip155:8453", rpc)).toBe(0);
-    const head = await anvil.rpc<{ number: string }>("eth_getBlockByNumber", ["finalized", false]);
+    // Base counts 10 L2 confirmations (ADR-0022): the counted head is latest − 9
+    const latest = await anvil.rpc<string>("eth_blockNumber");
     expect((await readCursor<{ block: string }>(s.rails, "evm:eip155:8453"))?.block).toBe(
-      BigInt(head.number).toString(),
+      (BigInt(latest) - 9n).toString(),
     );
   });
 });
 
 describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
-  it("EVM: provider SUCCESS → verifying → pending until finalized → succeeded on the receipt", async () => {
+  it("EVM (Base): provider SUCCESS → verifying → pending below 10 confirmations → succeeded `confirmed` on the receipt", async () => {
     const x = await create(live());
     const hash = await anvil.transfer(token, x.settlement.recipient, BigInt(x.settlement.expected));
     one.statuses.set(x.deposit?.address as string, {
@@ -447,23 +516,137 @@ describe("verifier (Tier A on Anvil, NEAR on recorded RPC, Tier B)", () => {
     });
     await s.call("POST", `/internal/executions/${x.id}/signals`, { body: { type: "payer_sent" } });
     await until(x.id, (e) => e.state === "verifying");
-    await new Promise((r) => setTimeout(r, 300));
-    expect((await get(x.id)).state).toBe("verifying"); // not finalized yet
-    await anvil.mine(70);
+    await anvil.mine(7); // 8 confirmations
+    await new Promise((r) => setTimeout(r, 400));
+    expect((await get(x.id)).state).toBe("verifying"); // below the threshold
+    await anvil.mine(2); // 10 confirmations: counts (no wait for Ethereum finality)
     const done = await until(x.id, (e) => e.state === "succeeded");
     expect(done.evidence).toMatchObject({
       source: "verifier",
       tier: "A",
       tx_hash: hash,
-      finality: "finalized",
+      finality: "confirmed",
       sender: expect.stringMatching(/^0x[0-9a-f]{40}$/),
     });
+    const receipt = await anvil.rpc<{ blockHash: string }>("eth_getTransactionReceipt", [hash]);
     const v = await s.admin.db
       .selectFrom("verifications")
       .selectAll()
       .where("execution_id", "=", toUuid(x.id, "ex"))
       .execute();
     expect(v.map((r) => r.result)).toEqual(["pass"]); // pending attempts are not recorded
+    expect(v[0]?.finality).toBe("confirmed");
+    expect(v[0]?.details).toMatchObject({ block_hash: receipt.blockHash, required_confirmations: 10 });
+    expect((v[0]?.details as { confirmations?: number } | undefined)?.confirmations ?? 0).toBeGreaterThanOrEqual(10);
+    const row = await s.admin.db
+      .selectFrom("executions")
+      .select(["finality_recheck_status", "finality_recheck_block_hash"])
+      .where("id", "=", toUuid(x.id, "ex"))
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({ finality_recheck_status: "pending", finality_recheck_block_hash: receipt.blockHash });
+  });
+
+  describe("post-success finalized re-check (§8.12)", () => {
+    /** A succeeded live execution whose confirmed evidence counted from `blockHash` (the re-check is due now). */
+    async function succeededOn(hash: string, blockHash: string, until = new Date(Date.now() + 7_200_000)) {
+      const r = await anvil.rpc<{ blockNumber: string }>("eth_getTransactionReceipt", [hash]);
+      const recipient = randomEvm();
+      const id = await insertExecution({
+        state: "awaiting_deposit",
+        destinationChain: "eip155:8453",
+        recipient,
+        recipientType: "destination_chain",
+        asset: USDC_BASE,
+        base: 5n,
+      });
+      await s.admin.db
+        .updateTable("executions")
+        .set({
+          state: "succeeded",
+          terminal_at: new Date(),
+          settled_amount: "5",
+          evidence: JSON.stringify({
+            chain: "eip155:8453",
+            tx_hash: hash,
+            block_ref: BigInt(r.blockNumber).toString(),
+            recipient,
+            asset_id: USDC_BASE,
+            amount: "5",
+            finality: "confirmed",
+            tier: "A",
+            source: "verifier",
+            observed_at: new Date().toISOString(),
+            explorer_url: null,
+          }),
+          finality_recheck_status: "pending",
+          finality_recheck_at: new Date(),
+          finality_recheck_until: until,
+          finality_recheck_block_hash: blockHash,
+        })
+        .where("id", "=", toUuid(id, "ex"))
+        .execute();
+      return id;
+    }
+    async function settledRecheck(id: string) {
+      const end = Date.now() + 10_000;
+      for (;;) {
+        const row = await s.admin.db
+          .selectFrom("executions")
+          .select(["state", "version", "finality_recheck_status", "finality_recheck_detail"])
+          .where("id", "=", toUuid(id, "ex"))
+          .executeTakeFirstOrThrow();
+        if (row.finality_recheck_status !== "pending" || Date.now() > end) return row;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+
+    it("a block hash that changed by finality alerts (log, metric, ops-visible) and leaves the payment succeeded", async () => {
+      const tr = s.tracker?.rails as NonNullable<typeof s.tracker>["rails"];
+      const alert = vi.spyOn(tr.log, "error");
+      const metric = vi.spyOn(tr.metrics, "finalityRecheck");
+      const hash = await anvil.transfer(token, randomEvm(), 5n);
+      await anvil.mine(70); // finalized now covers the block
+      const id = await succeededOn(hash, `0x${"cd".repeat(32)}`);
+      const row = await settledRecheck(id);
+      expect(row).toMatchObject({ state: "succeeded", version: 1, finality_recheck_status: "failed" });
+      expect(row.finality_recheck_detail).toMatchObject({
+        outcome: "failed",
+        reason: "block hash changed at finality",
+      });
+      expect(metric).toHaveBeenCalledWith("eip155:8453", "failed");
+      expect(alert).toHaveBeenCalledWith(
+        expect.objectContaining({ execution: toUuid(id, "ex"), tx_hash: hash }),
+        expect.stringMatching(/^ALERT finalized re-check failed/),
+      );
+      // evidence trail (console): a verifier observation, never applied
+      const obs = await s.call("GET", `/internal/executions/${id}/observations`);
+      expect((obs.body as { data: unknown[] }).data).toEqual([
+        expect.objectContaining({
+          source: "verifier",
+          applied: false,
+          payload: expect.objectContaining({
+            finality_recheck: expect.objectContaining({ outcome: "failed", tx_hash: hash }),
+          }),
+        }),
+      ]);
+      alert.mockRestore();
+      metric.mockRestore();
+    });
+
+    it("not finalized when the window ends → timeout alert; the payment stays succeeded", async () => {
+      const tr = s.tracker?.rails as NonNullable<typeof s.tracker>["rails"];
+      const alert = vi.spyOn(tr.log, "error");
+      const hash = await anvil.transfer(token, randomEvm(), 5n); // the head block: far from Anvil's finalized tag
+      const r = await anvil.rpc<{ blockHash: string }>("eth_getTransactionReceipt", [hash]);
+      const id = await succeededOn(hash, r.blockHash, new Date(Date.now() - 1000));
+      const row = await settledRecheck(id);
+      expect(row).toMatchObject({ state: "succeeded", finality_recheck_status: "timeout" });
+      expect(alert).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringMatching(/^ALERT finalized re-check timed out/),
+      );
+      alert.mockRestore();
+    });
   });
 
   it("EVM: a transfer to someone else holds the execution at the timeout (evidence_mismatch)", async () => {

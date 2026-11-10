@@ -51,7 +51,7 @@ export async function matchCredits(r: Rails, credits: readonly Credit[], o: Matc
     assetId: c.assetId,
     amount: c.amount,
     finality: o.finality,
-    details: { log_ref: c.logRef, ...details },
+    details: { log_ref: c.logRef, ...(c.details ?? {}), ...details },
     ...(c.detail ? { chainDetail: c.detail } : {}),
   });
 

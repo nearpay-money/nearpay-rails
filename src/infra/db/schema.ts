@@ -216,6 +216,12 @@ export interface ExecutionsTable {
   abandon_note: Opt<string>;
   // Stage 4 (0005, §21.4): the tier the execution was created with
   verification_tier: Opt<"A" | "B">;
+  // ADR-0022 (0006, §8.12): post-success `finalized` re-check of confirmation-based EVM evidence
+  finality_recheck_status: Opt<"pending" | "finalized" | "failed" | "timeout">;
+  finality_recheck_at: NullableTimestamp;
+  finality_recheck_until: NullableTimestamp;
+  finality_recheck_block_hash: Opt<string>;
+  finality_recheck_detail: NullableJson<Record<string, unknown>>;
 }
 
 export interface AmountTagsTable {

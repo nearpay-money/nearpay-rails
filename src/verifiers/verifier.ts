@@ -3,9 +3,11 @@
  * SUCCESS for, without watcher/indexer evidence yet, are checked against the destination chain using
  * the provider's destination tx hashes.
  *
- * - Tier A, EVM: receipt status 1 and block ≤ `finalized`; ERC-20 `Transfer(to = recipient)` on the
- *   token contract, or a native transfer (`tx.to == recipient`). Large amounts need a second RPC's
- *   agreement. An internal native transfer cannot be proven: Tier B rules apply.
+ * - Tier A, EVM: receipt status 1 and the chain's confirmation policy (ADR-0022: block ≤ `finalized`, or
+ *   `latest − block + 1 ≥ blocks` with the receipt re-read in the same block — evidence `confirmed`, followed by the
+ *   post-success `finalized` re-check, finality-recheck.ts); ERC-20 `Transfer(to = recipient)` on the token
+ *   contract, or a native transfer (`tx.to == recipient`). Large amounts need a second RPC's agreement. An internal
+ *   native transfer cannot be proven: Tier B rules apply.
  * - Tier A, NEAR: `EXPERIMENTAL_tx_status` FINAL; `mt_transfer` to the Intents account (intents.near)
  *   or NEP-141 `ft_transfer` to the account (token contract).
  * - Test mode: the sandbox's simulated chain (`/sim/chains/{chain}/tx/{hash}`).
@@ -23,6 +25,7 @@ import { applyEvidence, type EvidenceInput } from "../app/observations.js";
 import { policyFor } from "../app/pricing.js";
 import { tokenOf } from "../app/tokens.js";
 import { type ExecutionRow, pricedToken } from "../app/views.js";
+import { FINALIZED } from "../domain/chains/evm.js";
 import type { HeldReason } from "../domain/execution/state.js";
 import { usdMicros } from "../domain/pricing/pricing.js";
 import {
@@ -37,6 +40,7 @@ import type { NearRpc } from "../infra/clients/near.js";
 import type { SolanaRpc } from "../infra/clients/solana.js";
 import { outcomeSucceeded, senderOf } from "../trackers/near-indexer/parse.js";
 import { sandboxChainOutcome, toKey, verifyBitcoin, verifySolana } from "./chains.js";
+import { checkEvmConfirmation } from "./evm-confirmation.js";
 
 export interface VerifierDeps {
   readonly near: NearRpc | null;
@@ -83,7 +87,7 @@ async function verifyEvm(r: Rails, rpc: EvmRpc, row: ExecutionRow, hashes: reado
   const contract = token?.contract_address?.toLowerCase() ?? null;
   const recipient = row.destination_key.split("|")[1] as string;
   const expected = BigInt(row.amount_out_expected);
-  const finalized = await rpc.finalizedBlock();
+  const policy = r.profiles.get(row.destination_chain)?.evmConfirmation ?? FINALIZED;
   let best: VerifyOutcome | null = null;
   for (const hash of hashes) {
     const receipt = await rpc.receipt(hash);
@@ -95,8 +99,12 @@ async function verifyEvm(r: Rails, rpc: EvmRpc, row: ExecutionRow, hashes: reado
       best = { ...pending({ hash, reason: "transaction reverted" }), result: "mismatch" };
       continue;
     }
-    if (BigInt(receipt.blockNumber) > finalized) {
-      best = pending({ hash, reason: "not finalized", block: receipt.blockNumber, finalized: finalized.toString() });
+    const conf = await checkEvmConfirmation(rpc, policy, receipt);
+    if (conf.kind !== "counted") {
+      // not deep enough yet, or reorganised between the reads: look again on the next attempt
+      if (conf.kind === "reorged")
+        r.log.warn({ execution: row.id, hash, ...conf.details }, "EVM receipt reorganised before confirmation");
+      best = pending({ hash, ...conf.details });
       continue;
     }
     let transfers: ObservedTransfer[];
@@ -124,12 +132,21 @@ async function verifyEvm(r: Rails, rpc: EvmRpc, row: ExecutionRow, hashes: reado
       result: c.result,
       tier: "A",
       source: "verifier",
-      finality: "finalized",
+      finality: conf.finality,
       txHash: hash,
-      blockRef: BigInt(receipt.blockNumber).toString(),
+      blockRef: conf.blockNumber.toString(),
       amount: c.amount,
       sender: c.sender,
-      details: { hash, block_hash: receipt.blockHash },
+      details: {
+        hash,
+        block_hash: conf.blockHash,
+        ...(conf.confirmations !== null
+          ? {
+              confirmations: conf.confirmations,
+              required_confirmations: policy.kind === "confirmations" ? policy.blocks : null,
+            }
+          : {}),
+      },
     };
     if (c.result === "pass" || c.result === "short") {
       // agreement (§10): a second provider must see the same receipt for large amounts

@@ -34,6 +34,8 @@ export interface RailsMetrics {
   chainRpcCall(chain: string, outcome: string): void;
   /** Stage 4 (§8.6): `vault_events_total{outcome}` — `forwarded`, `duplicate` or a reject reason. */
   vaultEvent(outcome: string): void;
+  /** ADR-0022 (§8.12): `finality_recheck_total{chain,outcome}` — `finalized`, `failed` (alert) or `timeout` (alert). */
+  finalityRecheck(chain: string, outcome: "finalized" | "failed" | "timeout"): void;
 }
 
 export const noMetrics: RailsMetrics = {
@@ -52,6 +54,7 @@ export const noMetrics: RailsMetrics = {
   tierDegraded() {},
   chainRpcCall() {},
   vaultEvent() {},
+  finalityRecheck() {},
 };
 
 export function railsMetrics(m: ServiceMetrics): RailsMetrics {
@@ -99,6 +102,11 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
   const vaultForwarded = m.counter("vault_events_forwarded_total", "Vault events forwarded to evt.rails.vault.event.", [
     "outcome",
   ]);
+  const recheck = m.counter(
+    "finality_recheck_total",
+    "Post-success finalized re-checks of confirmation-based EVM evidence (§8.12); failed/timeout alert.",
+    ["chain", "outcome"],
+  );
   const lag = m.gauge("tracker_lag_blocks", "Blocks between the chain's final head and a tracker cursor.", ["tracker"]);
   return {
     quote: (provider, outcome, s) => quote.observe({ provider, outcome }, s),
@@ -123,6 +131,7 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
       outcome === "forwarded" || outcome === "duplicate"
         ? vaultForwarded.inc({ outcome })
         : vaultRejected.inc({ reason: outcome }),
+    finalityRecheck: (chain, outcome) => recheck.inc({ chain, outcome }),
   };
 }
 
@@ -176,6 +185,8 @@ export interface Rails {
   readonly archive: { readonly store: string | null; readonly afterDays: number };
   /** Stage 4 (§8.6): vault accounts whose `nearpay_vault` events are forwarded (live: null = not forwarded). */
   readonly vault: { readonly live: string | null; readonly test: string };
+  /** ADR-0022 (§8.12): post-success `finalized` re-check of confirmation-based EVM evidence. */
+  readonly finalityRecheck: { readonly windowS: number; readonly intervalS: number };
   readonly random: () => number;
   readonly now: () => number;
 }
