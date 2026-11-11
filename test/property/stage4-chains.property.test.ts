@@ -9,7 +9,7 @@
  * - Vault forwarding: a line is forwarded iff executor = vault ∧ success ∧ final ∧ schema-valid.
  */
 
-import { BITCOIN_CONFIRMATION_TIERS } from "@nearpay/spec";
+import { BITCOIN_CONFIRMATION_TIERS } from "@nearpay-money/spec";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {

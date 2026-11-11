@@ -5,8 +5,9 @@
  * min = max(USD 1.00, 20 × withdraw fee). Intents-account destinations: USD 0.01. A failed
  * computation keeps the last value.
  */
-import { NearAccountId } from "@nearpay/spec";
+
 import type { OneClickQuoteRequest } from "@nearpay-internal/spec";
+import { NearAccountId } from "@nearpay-money/spec";
 import { unitsForUsdMicros, usdMicros } from "../domain/pricing/pricing.js";
 import { minimumUsdMicros } from "../domain/verification/verification.js";
 import type { Rails } from "./context.js";

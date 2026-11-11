@@ -5,11 +5,12 @@
  * `operator` observation; it never forces a state (INV-2). Every reverify publishes `evt.rails.ops_action.recorded`
  * (ids only) through the outbox in the same transaction (T-12, unified console audit trail).
  */
-import type { RouteQuery } from "@nearpay/spec";
+
 import { emit } from "@nearpay-internal/db";
 import { fromUuid, toUuid, uuidv7 } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import type { Execution, listOpsExecutions } from "@nearpay-internal/spec";
+import type { RouteQuery } from "@nearpay-money/spec";
 import type { Rails } from "./context.js";
 import { getExecutionRow } from "./executions.js";
 import { applyChange, lockExecution } from "./ledger.js";

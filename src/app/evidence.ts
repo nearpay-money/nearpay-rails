@@ -3,11 +3,12 @@
  * reference) and the per-day evidence summary payments reconciles against. Every query filters by account and mode
  * (INV-8) except the by-id observation read, which is scoped by the execution itself.
  */
-import type { RouteQuery } from "@nearpay/spec";
+
 import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import type { EvidenceSummary, getEvidenceSummary, ProviderObservation } from "@nearpay-internal/spec";
+import type { RouteQuery } from "@nearpay-money/spec";
 import type { Owner } from "../domain/execution/owner.js";
 import { dayComplete, evidenceDigest, utcDay } from "../domain/reconciliation/digest.js";
 import type { Rails } from "./context.js";

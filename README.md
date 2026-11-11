@@ -58,7 +58,7 @@ nearpay-rails/
 
 | Command                                                                                                  | What it does                                                                                                                                                |
 | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm install`                                                                                           | Install (Node 22, pnpm 9); `@nearpay/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it)         |
+| `pnpm install`                                                                                           | Install (Node 22, pnpm 9); `@nearpay-money/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it)   |
 | `pnpm test`                                                                                              | Unit and property tests                                                                                                                                     |
 | `pnpm test:integration`                                                                                  | Integration and contract tests: Postgres, NATS, the `nearpay/sandbox:local` image and Anvil in Testcontainers (needs Docker; build the sandbox image first) |
 | `pnpm verify`                                                                                            | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                            |
@@ -108,7 +108,7 @@ docker compose -p nearpay exec rails-api /nodejs/bin/node dist/ops.js execution-
 
 ## Status
 
-Stage 1 (step 1.2) and Stage 2 (step 2.2) implemented against `@nearpay/spec` / `@nearpay-internal/spec` 0.2.0 and kit 0.2.0: refund legs (`POST /internal/refund_executions`), pricing/FX (ECB reference rates with the TARGET-calendar bound, CoinGecko keyless secondary prices, exact rationals, `peg_currency` par), `GET /internal/fx-rates`, `/internal/settlement-estimate`, `/internal/executions/{id}/observations`, `/internal/evidence/summary`, the Explorer feed (owner token; sandbox mirror in test mode), the observation archive (Parquet, `file:` or `s3://` store) and the console routes `/ops/executions…`. Solana and Bitcoin watchers/verifiers and vault event forwarding arrive in Stage 4 (LLD §16).
+Stage 1 (step 1.2) and Stage 2 (step 2.2) implemented against `@nearpay-money/spec` / `@nearpay-internal/spec` 0.2.0 and kit 0.2.0: refund legs (`POST /internal/refund_executions`), pricing/FX (ECB reference rates with the TARGET-calendar bound, CoinGecko keyless secondary prices, exact rationals, `peg_currency` par), `GET /internal/fx-rates`, `/internal/settlement-estimate`, `/internal/executions/{id}/observations`, `/internal/evidence/summary`, the Explorer feed (owner token; sandbox mirror in test mode), the observation archive (Parquet, `file:` or `s3://` store) and the console routes `/ops/executions…`. Solana and Bitcoin watchers/verifiers and vault event forwarding arrive in Stage 4 (LLD §16).
 
 ## Built with
 

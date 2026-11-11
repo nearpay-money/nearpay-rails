@@ -8,7 +8,7 @@
  * - Bitcoin is never amount-tagged (§21.1): evidence always comes from the verifier on the provider's txid.
  */
 
-import { type BitcoinEvidence, type ConfirmationTier, requiredConfirmations } from "@nearpay/spec";
+import { type BitcoinEvidence, type ConfirmationTier, requiredConfirmations } from "@nearpay-money/spec";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { base58check, bech32, bech32m } from "@scure/base";
 import { convertUnits, parseExactDecimal } from "../pricing/ratio.js";

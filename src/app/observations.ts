@@ -4,10 +4,10 @@
  * those that are not older than the stored provider timestamp are applied (§5 "Monotonic").
  */
 import { createHash } from "node:crypto";
-import type { Evidence } from "@nearpay/spec";
 import { explorerTxUrl, getChain } from "@nearpay-internal/chains";
 import { uuidv7 } from "@nearpay-internal/ids";
 import type { OneClickStatusResponse } from "@nearpay-internal/spec";
+import type { Evidence } from "@nearpay-money/spec";
 import { observedRouteFee } from "../domain/execution/amounts.js";
 import { isExpired, LATE_REFUND_WINDOW_MS, nextPollAt } from "../domain/execution/schedule.js";
 import { decideEvidence, decideProviderStatus, type HeldReason, type State } from "../domain/execution/state.js";

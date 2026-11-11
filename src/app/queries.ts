@@ -1,5 +1,5 @@
 /** Read APIs (lld/rails.md §6): assets, chain profiles, options, minimums, evidence, deposit lookup. */
-import type { RouteQuery, RouteResponse } from "@nearpay/spec";
+
 import { getChain, validateAddress } from "@nearpay-internal/chains";
 import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
@@ -12,6 +12,7 @@ import type {
   listInternalOptions,
   lookupExecutionByDeposit,
 } from "@nearpay-internal/spec";
+import type { RouteQuery, RouteResponse } from "@nearpay-money/spec";
 import { dualPrice, indicativeUsd, parCheck, pricesOf } from "../domain/pricing/pricing.js";
 import { routeClass, tokenContract } from "../domain/token-registry/registry.js";
 import type { Rails } from "./context.js";

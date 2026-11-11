@@ -5,9 +5,9 @@
  * fallback, the sandbox evidence adapter (§21.5) and vault event forwarding.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { BitcoinEvidence, SolanaEvidence } from "@nearpay/spec";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { EventEnvelope, Execution, VaultEventRecord } from "@nearpay-internal/spec";
+import { BitcoinEvidence, SolanaEvidence } from "@nearpay-money/spec";
 import bs58 from "bs58";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { tierAtCreate } from "../../src/app/chain-tier.js";

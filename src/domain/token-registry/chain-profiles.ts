@@ -4,8 +4,8 @@
  * against the kit chain registry (address formats and explorers live there).
  */
 
-import type { ConfirmationTier } from "@nearpay/spec";
 import { type ChainInfo, getChain } from "@nearpay-internal/chains";
+import type { ConfirmationTier } from "@nearpay-money/spec";
 import { z } from "zod";
 import { defaultEvmConfirmation, type EvmConfirmation, MAX_CONFIRMATIONS, policyLabel } from "../chains/evm.js";
 

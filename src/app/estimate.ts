@@ -2,9 +2,10 @@
  * `GET /internal/settlement-estimate` (lld/rails.md §6, §8.2): the execution pricing rules without quoting. Payments
  * values non-USD prices in USD micros (minimums, unverified cap) and gets the options `amount_out`.
  */
-import type { RouteQuery } from "@nearpay/spec";
+
 import { ApiError } from "@nearpay-internal/service";
 import type { estimateSettlement, SettlementEstimate } from "@nearpay-internal/spec";
+import type { RouteQuery } from "@nearpay-money/spec";
 import { type Pricing, PricingError, settle, usdValue } from "../domain/pricing/pricing.js";
 import { convertUnits, toDisplayDecimal } from "../domain/pricing/ratio.js";
 import type { Rails } from "./context.js";

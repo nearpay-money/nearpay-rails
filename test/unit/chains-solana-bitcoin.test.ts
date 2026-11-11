@@ -7,7 +7,7 @@ import {
   parseOmftAssetId,
   requiredConfirmations,
   SolanaEvidence,
-} from "@nearpay/spec";
+} from "@nearpay-money/spec";
 import { describe, expect, it } from "vitest";
 import {
   checkBitcoinTransfer,

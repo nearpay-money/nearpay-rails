@@ -5,7 +5,6 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { Evidence, PUBLIC_ROUTES } from "@nearpay/spec";
 import { unhandledSubjects } from "@nearpay-internal/bus";
 import { unimplementedRoutes } from "@nearpay-internal/service";
 import {
@@ -22,6 +21,7 @@ import {
   type Subject,
   VaultEventRecord,
 } from "@nearpay-internal/spec";
+import { Evidence, PUBLIC_ROUTES } from "@nearpay-money/spec";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { railsRoutes } from "../../src/api/routes.js";

@@ -8,7 +8,6 @@
 import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
-import { BITCOIN_MAINNET, SOLANA_MAINNET } from "@nearpay/spec";
 import type { KeySource } from "@nearpay-internal/auth";
 import { serviceTokenClient } from "@nearpay-internal/auth";
 import {
@@ -36,6 +35,7 @@ import {
 } from "@nearpay-internal/db";
 import { type BackgroundTask, createService, type Service } from "@nearpay-internal/service";
 import { STREAMS, type Subject } from "@nearpay-internal/spec";
+import { BITCOIN_MAINNET, SOLANA_MAINNET } from "@nearpay-money/spec";
 import { parse as parseYaml } from "yaml";
 import { railsRoutes } from "../api/routes.js";
 import { type ArchiveStore, archiveStore } from "../archive/store.js";
