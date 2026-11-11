@@ -15,7 +15,7 @@
  *   starts at its newest signature (a payout can only land after the execution exists).
  */
 
-import { SOLANA_MAINNET } from "@nearpay/spec";
+import { SOLANA_MAINNET } from "@nearpay-money/spec";
 import { recordPoolHealth } from "../../app/chain-tier.js";
 import type { Rails } from "../../app/context.js";
 import { associatedTokenAddress, solanaDelta, TOKEN_PROGRAM } from "../../domain/chains/solana.js";

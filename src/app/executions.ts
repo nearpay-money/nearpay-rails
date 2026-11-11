@@ -9,12 +9,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { NearAccountId, type RouteBody } from "@nearpay/spec";
 import { destinationKey, getChain, validateAddress } from "@nearpay-internal/chains";
 import { sql } from "@nearpay-internal/db";
 import { toUuid, uuidv7 } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import type { createExecution as createExecutionRoute, Execution, OneClickQuoteRequest } from "@nearpay-internal/spec";
+import { NearAccountId, type RouteBody } from "@nearpay-money/spec";
 import {
   baseAfterBearer,
   binding as bindingOf,

@@ -1,6 +1,6 @@
 /** Stage 4 pools and clients (§21.4) with an injected fetch: failover, hedging, 429 back-off, health; sandbox vault feed. */
 
-import { BITCOIN_DEFAULT_CONFIRMATION_TIERS } from "@nearpay/spec";
+import { BITCOIN_DEFAULT_CONFIRMATION_TIERS } from "@nearpay-money/spec";
 import { describe, expect, it } from "vitest";
 import type { Rails } from "../../src/app/context.js";
 import type { ExecutionRow } from "../../src/app/views.js";

@@ -17,8 +17,8 @@
  *   `<chain>|<block_ref>`).
  */
 import { createHash } from "node:crypto";
-import type { BitcoinEvidence, ConfirmationTier, SolanaEvidence } from "@nearpay/spec";
 import { SimTx } from "@nearpay-internal/spec";
+import type { BitcoinEvidence, ConfirmationTier, SolanaEvidence } from "@nearpay-money/spec";
 import type { Rails } from "../app/context.js";
 import { tokenOf } from "../app/tokens.js";
 import type { ExecutionRow } from "../app/views.js";

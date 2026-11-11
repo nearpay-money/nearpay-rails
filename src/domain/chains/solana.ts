@@ -12,7 +12,7 @@
  * - A transaction with `meta.err` set proves nothing.
  */
 
-import type { SolanaEvidence } from "@nearpay/spec";
+import type { SolanaEvidence } from "@nearpay-money/spec";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { keccak_256 } from "@noble/hashes/sha3.js";

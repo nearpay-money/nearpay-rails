@@ -22,8 +22,8 @@ import type { Rails, Tx } from "../../app/context.js";
 /** Catalogue subject of the forwarded events (aggregate `vault_mandate`). */
 const VAULT_EVENT_SUBJECT = "evt.rails.vault.event" as const;
 
-import { EVENT_JSON_PREFIX, parseVaultEventLog, VAULT_EVENT_STANDARD, VAULT_EVENT_VERSION } from "@nearpay/spec";
 import { type VAULT_EVENT_REJECT_REASONS, VaultEventRecord } from "@nearpay-internal/spec";
+import { EVENT_JSON_PREFIX, parseVaultEventLog, VAULT_EVENT_STANDARD, VAULT_EVENT_VERSION } from "@nearpay-money/spec";
 
 export type VaultRejectReason = (typeof VAULT_EVENT_REJECT_REASONS)[number];
 

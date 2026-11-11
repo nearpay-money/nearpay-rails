@@ -6,7 +6,7 @@
  * same asset across chains (USDC on Base and USDC on NEAR are `same_asset`), and `is_usd_stable`
  * marks the USD stablecoins that may settle at par (§8.2).
  */
-import { AssetId, parseOmftAssetId } from "@nearpay/spec";
+import { AssetId, parseOmftAssetId } from "@nearpay-money/spec";
 import { splAssetId } from "../chains/solana.js";
 import { parseExactDecimal, ratioToWire } from "../pricing/ratio.js";
 import type { ChainProfiles } from "./chain-profiles.js";

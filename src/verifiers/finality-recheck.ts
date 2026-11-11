@@ -19,8 +19,9 @@
  * `finality_recheck_status` on the row for ops and write a `verifier` observation (applied = false) into the
  * execution's evidence trail (console).
  */
-import { BITCOIN_MAINNET, SOLANA_MAINNET } from "@nearpay/spec";
+
 import { sql } from "@nearpay-internal/db";
+import { BITCOIN_MAINNET, SOLANA_MAINNET } from "@nearpay-money/spec";
 import type { Rails } from "../app/context.js";
 import { type RecheckFamily, recheckPlan } from "../app/finality.js";
 import { observationValues } from "../app/observations.js";

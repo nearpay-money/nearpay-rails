@@ -10,7 +10,7 @@
  * address seen for the first time records its current history without nudging.
  */
 
-import { BITCOIN_MAINNET } from "@nearpay/spec";
+import { BITCOIN_MAINNET } from "@nearpay-money/spec";
 import { recordPoolHealth } from "../../app/chain-tier.js";
 import type { Rails } from "../../app/context.js";
 import { normalizeBitcoinAddress, outputsTo } from "../../domain/chains/bitcoin.js";

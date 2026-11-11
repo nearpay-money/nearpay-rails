@@ -5,7 +5,6 @@
  * relay publishes `evt.rails.execution.*` (lld/rails.md §5, §7–§9).
  */
 
-import type { IntentMessage } from "@nearpay/spec";
 import { sql } from "@nearpay-internal/db";
 import { toUuid } from "@nearpay-internal/ids";
 import {
@@ -17,6 +16,7 @@ import {
 } from "@nearpay-internal/intents";
 import { EventEnvelope, Execution } from "@nearpay-internal/spec";
 import { domainEvent, internalSettlementDestination } from "@nearpay-internal/testing";
+import type { IntentMessage } from "@nearpay-money/spec";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { intentsTransfer, randomEvm, routeQuote, toIntents } from "../support/requests.js";

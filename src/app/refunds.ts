@@ -15,7 +15,6 @@
  * The kill switch blocks new live legs (§8.1 step 0); legs already funded keep being tracked (INV-3).
  */
 
-import { NearAccountId, type RouteBody } from "@nearpay/spec";
 import { destinationKey, validateAddress } from "@nearpay-internal/chains";
 import { toUuid, uuidv7 } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
@@ -25,6 +24,7 @@ import type {
   OneClickQuoteRequest,
   OneClickQuoteResponse,
 } from "@nearpay-internal/spec";
+import { NearAccountId, type RouteBody } from "@nearpay-money/spec";
 import { binding as bindingOf, executionDeadline } from "../domain/execution/amounts.js";
 import { checkQuote, checkRefundBounds, REFUND_PRICE_BAND_BPS } from "../domain/execution/integrity.js";
 import { nextPollAt } from "../domain/execution/schedule.js";

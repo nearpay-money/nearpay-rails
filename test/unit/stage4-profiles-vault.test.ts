@@ -1,7 +1,7 @@
 /** Stage 4: chain profiles vs the spec vectors, boot-time tiers, SPL registry binding, vault event rules (§21, §8.6). */
 import { readFileSync } from "node:fs";
-import { BITCOIN_DEFAULT_CONFIRMATION_TIERS, parseVaultEventLog } from "@nearpay/spec";
 import { VaultEventRecord, vaultEventDedupeKey } from "@nearpay-internal/spec";
+import { BITCOIN_DEFAULT_CONFIRMATION_TIERS, parseVaultEventLog } from "@nearpay-money/spec";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { chainProfiles, ONE_CONFIRMATION, ProfileError } from "../../src/domain/token-registry/chain-profiles.js";

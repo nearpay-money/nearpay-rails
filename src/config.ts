@@ -1,6 +1,7 @@
 /** Configuration (lld/rails.md §11, foundations §13). */
-import { NearAccountId } from "@nearpay/spec";
+
 import { baseConfigShape, list, loadConfig, secret, url } from "@nearpay-internal/service";
+import { NearAccountId } from "@nearpay-money/spec";
 import { z } from "zod";
 import { type EvmConfirmation, parseEvmConfirmation } from "./domain/chains/evm.js";
 

@@ -1,5 +1,5 @@
 /** Spec route bindings (lld/rails.md §6). Auth, scopes, ops roles and step-up are enforced from the spec by the kit. */
-import { listAssets } from "@nearpay/spec";
+
 import { ApiError, implement, type RouteBinding } from "@nearpay-internal/service";
 import {
   abandonExecution as abandonExecutionRoute,
@@ -23,6 +23,7 @@ import {
   signalExecution as signalRoute,
   submitExecutionDepositTx,
 } from "@nearpay-internal/spec";
+import { listAssets } from "@nearpay-money/spec";
 import { abandonExecution } from "../app/abandon.js";
 import { forbidden, ownedRow, readableRow, refusalError } from "../app/access.js";
 import type { Rails } from "../app/context.js";
