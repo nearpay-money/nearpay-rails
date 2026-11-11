@@ -444,6 +444,25 @@ describe("reads", () => {
     expect(chains.has("eip155:8453")).toBe(true);
   });
 
+  it("options: unavailable routes carry stable reason codes (cross_chain_paused leaves Intents transfers on)", async () => {
+    const path = `/internal/options?destination_asset=${USDC_NEAR}&destination_type=intents_account&amount_out=20000000&livemode=false`;
+    const get = async () =>
+      (await s.call("GET", path)).body as { options: { method: string; available: boolean; reason: string | null }[] };
+    const flag = (value: boolean) =>
+      s.admin.db.updateTable("control_flags").set({ value }).where("name", "=", "cross_chain_enabled").execute();
+    await flag(false);
+    try {
+      const o = (await get()).options;
+      expect(o[0]).toMatchObject({ method: "intents_transfer", available: true, reason: null });
+      const routes = o.filter((x) => x.method === "route_quote");
+      expect(routes.length).toBeGreaterThan(0);
+      expect(new Set(routes.map((x) => `${x.available}:${x.reason}`))).toEqual(new Set(["false:cross_chain_paused"]));
+    } finally {
+      await flag(true);
+    }
+    expect((await get()).options.every((x) => x.available && x.reason === null)).toBe(true);
+  });
+
   it("deposit lookup tells genuine from unknown deposit addresses", async () => {
     const x = Execution.parse((await create(routeQuote())).body);
     const r = await s.call("GET", `/internal/executions?deposit_address=${x.deposit?.address}`, {
