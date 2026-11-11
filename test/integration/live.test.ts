@@ -402,9 +402,11 @@ describe("routing health (stable reasons, gauges, ALERT lines)", () => {
     await until('nearpay_rails_routing_available{livemode="true"}', 1);
     expect(await gauge('nearpay_rails_routing_blocked{livemode="true",reason="kill_switch_engaged"}')).toBe(0);
     expect(await gauge('nearpay_rails_token_registry_age_seconds{livemode="true"}')).toBeLessThan(3600);
-    expect(
-      await gauge(`nearpay_rails_settlement_price_age_seconds{livemode="true",asset="${USDC_BASE}"}`),
-    ).toBeLessThan(60);
+    // the asset is in use from the monitor's next tick on
+    const ageSeries = `nearpay_rails_settlement_price_age_seconds{livemode="true",asset="${USDC_BASE}"}`;
+    const ageEnd = Date.now() + 5_000;
+    while ((await gauge(ageSeries)) === undefined && Date.now() < ageEnd) await new Promise((r) => setTimeout(r, 100));
+    expect(await gauge(ageSeries)).toBeLessThan(60);
     const logs = captureLogs();
     try {
       await setFlag("quoting_enabled", false);
