@@ -10,6 +10,7 @@ import { isId, toUuid } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import type { Rails } from "../app/context.js";
 import { refreshMinimums } from "../app/minimums.js";
+import { computeRoutingHealth, explainHealth } from "../app/routing-health.js";
 import { refreshTokens } from "../app/tokens.js";
 import { executionView } from "../app/views.js";
 
@@ -19,7 +20,8 @@ export const USAGE = `usage: ops.js <command> [arguments]
   flags                                     control flags
   flag-set <quoting_enabled|cross_chain_enabled> <true|false> <reason…>
   tokens-refresh [live|test]                reload a token registry from its provider now
-  minimums-refresh                          recompute destination minimums now`;
+  minimums-refresh                          recompute destination minimums now
+  routing-health [live|test]                can payments route now? blocking reasons with the fix for each`;
 
 class UsageError extends Error {}
 
@@ -122,6 +124,15 @@ async function run(r: Rails, cmd: string | undefined, args: string[], actor: str
       const which = args[0] ?? "test";
       if (which !== "live" && which !== "test") throw new UsageError("tokens-refresh live|test");
       return { mode: which, tokens: await refreshTokens(r, which === "live") };
+    }
+    case "routing-health": {
+      const which = args[0];
+      if (which !== undefined && which !== "live" && which !== "test")
+        throw new UsageError("routing-health [live|test]");
+      const modes = which ? [which === "live"] : [true, false];
+      const out = [];
+      for (const lm of modes) out.push(explainHealth(await computeRoutingHealth(r, lm)));
+      return which ? out[0] : out;
     }
     case "minimums-refresh":
       return { written: await refreshMinimums(r) };

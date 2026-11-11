@@ -32,7 +32,14 @@ import {
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import type { Rails } from "../../src/app/context.js";
 import { readKillSwitch } from "../../src/app/kill-switch.js";
-import { createApi, createFeeds, createTracker, type FeedsDeps, type TrackerDeps } from "../../src/app/services.js";
+import {
+  createApi,
+  createFeeds,
+  createTracker,
+  type FeedsDeps,
+  type ServiceDeps,
+  type TrackerDeps,
+} from "../../src/app/services.js";
 import type { ApiConfig, FeedsConfig } from "../../src/config.js";
 import type { Nonces } from "../../src/infra/clients/nonces.js";
 import { MIGRATIONS_DIR } from "../../src/infra/db/migrations.js";
@@ -166,6 +173,8 @@ export interface StackOptions {
   nonces?: Nonces;
   /** Leave the kill-switch state unknown at start (tests of the boot read). */
   killSwitchUnknown?: boolean;
+  /** api routing-health monitor cadence (default: the service's 15 s). */
+  routingHealth?: ServiceDeps["routingHealth"];
 }
 
 export async function startStack(o: StackOptions = {}): Promise<Stack> {
@@ -282,7 +291,11 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
   const deps = { keys: testKeySource(), serviceToken, providers, ...(o.nonces ? { nonces: o.nonces } : {}) };
 
   const apiDb = createDb<DB>({ url: appUrl, applicationName: "rails-api-test" });
-  const { service: api, rails } = createApi(config, { ...deps, database: apiDb });
+  const { service: api, rails } = createApi(config, {
+    ...deps,
+    database: apiDb,
+    ...(o.routingHealth ? { routingHealth: o.routingHealth } : {}),
+  });
   const { port } = await api.start();
   // the boot read runs in the background; make the state known before any test quotes live (spec 0.2.1)
   if (o.killSwitchUnknown !== true) await readKillSwitch(rails, { force: true });

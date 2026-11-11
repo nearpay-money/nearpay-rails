@@ -9,10 +9,12 @@ import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { Execution } from "@nearpay-internal/spec";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { readKillSwitch } from "../../src/app/kill-switch.js";
 import { refreshTokens } from "../../src/app/tokens.js";
 import { type EvmRpc, evmRpc } from "../../src/infra/clients/evm.js";
 import { explorer } from "../../src/infra/clients/explorer.js";
 import { neardata, nearRpc } from "../../src/infra/clients/near.js";
+import { runOps } from "../../src/ops/cli.js";
 import { oneClickProvider } from "../../src/providers/oneclick/client.js";
 import { ModeViolation } from "../../src/providers/port.js";
 import { sandboxProvider } from "../../src/providers/sandbox/client.js";
@@ -53,6 +55,7 @@ beforeAll(async () => {
   s = await startStack({
     oneclick: one,
     config: { treasuryAccount: TREASURY },
+    routingHealth: { intervalMs: 200, graceMs: 0, minLogMs: 0 },
     tracker: {
       // Anvil stands in for Base and (one-block rule, ADR-0022 as amended) for Ethereum L1
       evm: new Map([
@@ -309,6 +312,158 @@ describe("live quotes through the 1Click adapter", () => {
       serviceToken: async () => "t",
     });
     await expect(sb.quote(true, live() as never)).rejects.toBeInstanceOf(ModeViolation);
+  });
+});
+
+describe("routing health (stable reasons, gauges, ALERT lines)", () => {
+  const optionsPath = `/internal/options?destination_asset=${USDC_BASE}&destination_type=chain_address&amount_out=1000000&livemode=true`;
+  const reasons = async () => {
+    const r = await s.call("GET", optionsPath);
+    expect(r.status).toBe(200);
+    const o = (r.body as { options: { available: boolean; reason: string | null }[] }).options;
+    expect(o.length).toBeGreaterThan(0);
+    return [...new Set(o.map((x) => (x.available ? "available" : x.reason)))];
+  };
+  const setFlag = (name: string, value: boolean) =>
+    s.admin.db.updateTable("control_flags").set({ value }).where("name", "=", name).execute();
+  const gauge = async (series: string) => {
+    const text = await s.api.metrics.render();
+    const line = text.split("\n").find((l) => l.startsWith(`${series} `));
+    return line === undefined ? undefined : Number(line.slice(series.length + 1));
+  };
+  const until = async (series: string, want: number) => {
+    const end = Date.now() + 5_000;
+    for (;;) {
+      const v = await gauge(series);
+      if (v === want) return v;
+      if (Date.now() > end) throw new Error(`${series} = ${v}, wanted ${want}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  const captureLogs = () => {
+    const lines: { level: string; fields: Record<string, unknown>; msg: string }[] = [];
+    const real = s.rails.log;
+    const at = (level: string) => (fields: Record<string, unknown>, msg: string) => {
+      lines.push({ level, fields, msg });
+    };
+    s.rails.log = { ...real, warn: at("warn"), info: at("info"), error: at("error") } as typeof real;
+    return { lines, restore: () => (s.rails.log = real) };
+  };
+
+  it("options report the blocking reason as a stable code, per cause", async () => {
+    await s.admin.db.updateTable("tokens").set({ price_updated_at: new Date() }).where("livemode", "=", true).execute();
+    expect(await reasons()).toEqual(["available"]);
+    await setFlag("quoting_enabled", false);
+    try {
+      expect(await reasons()).toEqual(["kill_switch_engaged"]);
+    } finally {
+      await setFlag("quoting_enabled", true);
+    }
+    await setFlag("cross_chain_enabled", false);
+    try {
+      expect(await reasons()).toEqual(["cross_chain_paused"]);
+    } finally {
+      await setFlag("cross_chain_enabled", true);
+    }
+    // the settlement asset's 1Click price is older than 300 s by its provider timestamp
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ price_updated_at: new Date(Date.now() - 600_000) })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    try {
+      expect(await reasons()).toEqual(["settlement_price_stale"]);
+    } finally {
+      await s.admin.db
+        .updateTable("tokens")
+        .set({ price_updated_at: new Date() })
+        .where("livemode", "=", true)
+        .execute();
+    }
+    expect(await reasons()).toEqual(["available"]);
+  });
+
+  it("gauges, ALERT routing_blocked on the flip and INFO on recovery; ops routing-health explains the reasons", async () => {
+    await s.admin.db
+      .insertInto("watched_destinations")
+      .values({
+        destination_id: randomUUID(),
+        account_id: toUuid(ACCOUNT, "acct"),
+        livemode: true,
+        chain: "eip155:8453",
+        address_norm: randomEvm(),
+        asset_id: USDC_BASE,
+        type: "chain_address",
+        active: true,
+        source_version: 1,
+      })
+      .execute();
+    await until('nearpay_rails_routing_available{livemode="true"}', 1);
+    expect(await gauge('nearpay_rails_routing_blocked{livemode="true",reason="kill_switch_engaged"}')).toBe(0);
+    expect(await gauge('nearpay_rails_token_registry_age_seconds{livemode="true"}')).toBeLessThan(3600);
+    // the asset is in use from the monitor's next tick on
+    const ageSeries = `nearpay_rails_settlement_price_age_seconds{livemode="true",asset="${USDC_BASE}"}`;
+    const ageEnd = Date.now() + 5_000;
+    while ((await gauge(ageSeries)) === undefined && Date.now() < ageEnd) await new Promise((r) => setTimeout(r, 100));
+    expect(await gauge(ageSeries)).toBeLessThan(60);
+    const logs = captureLogs();
+    try {
+      await setFlag("quoting_enabled", false);
+      await until('nearpay_rails_routing_blocked{livemode="true",reason="kill_switch_engaged"}', 1);
+      expect(await gauge('nearpay_rails_routing_available{livemode="true"}')).toBe(0);
+      const alert = logs.lines.find((l) => l.msg.startsWith("ALERT routing_blocked"));
+      expect(alert).toMatchObject({ level: "warn", fields: { livemode: true, reasons: ["kill_switch_engaged"] } });
+      const out: string[] = [];
+      expect(await runOps(["routing-health", "live"], s.rails, { actor: "test", out: (l) => out.push(l) })).toBe(0);
+      expect(JSON.parse(out.join("\n"))).toMatchObject({
+        mode: "live",
+        available: false,
+        reasons: [{ reason: "kill_switch_engaged", fix: expect.stringContaining("console") }],
+      });
+      await setFlag("quoting_enabled", true);
+      await until('nearpay_rails_routing_available{livemode="true"}', 1);
+      expect(await gauge('nearpay_rails_routing_blocked{livemode="true",reason="kill_switch_engaged"}')).toBe(0);
+      const end = Date.now() + 2_000;
+      while (!logs.lines.some((l) => l.msg === "live payments route again") && Date.now() < end)
+        await new Promise((r) => setTimeout(r, 50));
+      expect(logs.lines.some((l) => l.level === "info" && l.msg === "live payments route again")).toBe(true);
+      // both modes when no mode is given; usage errors exit 2
+      const both: string[] = [];
+      await runOps(["routing-health"], s.rails, { actor: "test", out: (l) => both.push(l) });
+      expect((JSON.parse(both.join("\n")) as { mode: string }[]).map((x) => x.mode)).toEqual(["live", "test"]);
+      expect(await runOps(["routing-health", "x"], s.rails, { actor: "test", err: () => {} })).toBe(2);
+    } finally {
+      logs.restore();
+      await setFlag("quoting_enabled", true);
+    }
+  });
+
+  it("an unreadable kill switch: ALERT kill_switch_unknown with the cause, kill_switch_unknown on options", async () => {
+    const setUnknown = () =>
+      s.admin.db
+        .updateTable("control_flags")
+        .set({ known: false, value: true, source_version: 0 })
+        .where("name", "=", "quoting_enabled")
+        .execute();
+    const logs = captureLogs();
+    try {
+      s.killSwitch.fail = true; // before the state turns unknown: the monitor may read too
+      await setUnknown();
+      expect(await readKillSwitch(s.rails, { force: true })).toBe("unknown");
+      const alert = logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_unknown"));
+      expect(alert?.level).toBe("warn");
+      expect(alert?.fields.cause).toMatch(/^http_5\d\d$/);
+      expect(await reasons()).toEqual(["kill_switch_unknown"]);
+      s.killSwitch.fail = false;
+      expect(await readKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(logs.lines.some((l) => l.level === "info" && /known again/.test(l.msg))).toBe(true);
+      expect(await reasons()).toEqual(["available"]);
+    } finally {
+      logs.restore();
+      s.killSwitch.fail = false;
+      await readKillSwitch(s.rails, { force: true });
+    }
   });
 });
 

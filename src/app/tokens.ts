@@ -4,8 +4,65 @@
  */
 import { sql } from "@nearpay-internal/db";
 import { registryRows } from "../domain/token-registry/registry.js";
-import type { Rails } from "./context.js";
+import { alertLimiter, errorClass } from "../infra/clients/error-class.js";
+import { mode, type Rails } from "./context.js";
 import type { TokenRowDb } from "./views.js";
+
+/** Registry refresh cadence (§9: `/v0/tokens` every 30 s). */
+export const TOKEN_REFRESH_MS = 30_000;
+/** A registry not refreshed for this long is stale (`token_registry_stale`, gauge `token_registry_age_seconds`). */
+export const REGISTRY_STALE_MS = 3 * TOKEN_REFRESH_MS;
+/** A failing refresh logs `ALERT token_registry_refresh_failed` at once, then at most this often. */
+export const REFRESH_ALERT_EVERY_MS = 5 * 60_000;
+
+/**
+ * One refresh of the feeds loop: failures (1Click unreachable through the egress proxy, auth, an empty or malformed
+ * list…) log `ALERT token_registry_refresh_failed` with the error class (rate-limited per mode) and an INFO once the
+ * registry refreshes again. Never throws; returns the number of rows, or null on failure.
+ */
+export function monitoredRefresh(r: Rails) {
+  const alerts = new Map<boolean, ReturnType<typeof alertLimiter>>();
+  return async (livemode: boolean): Promise<number | null> => {
+    let a = alerts.get(livemode);
+    if (!a) {
+      a = alertLimiter(REFRESH_ALERT_EVERY_MS, r.now);
+      alerts.set(livemode, a);
+    }
+    try {
+      const n = await refreshTokens(r, livemode);
+      if (a.active) {
+        r.log.info({ livemode, mode: mode(livemode), failures: a.count, tokens: n }, "token registry refreshed again");
+        a.reset();
+      }
+      return n;
+    } catch (e) {
+      const c = errorClass(e);
+      if (a.due())
+        r.log.warn(
+          {
+            livemode,
+            mode: mode(livemode),
+            error_class: c.class,
+            status: c.status,
+            err: c.message,
+            consecutive_failures: a.count,
+          },
+          `ALERT token_registry_refresh_failed: the ${mode(livemode)} token registry could not be refreshed from its provider (${c.class}); prices go stale and payments stop routing after 5 minutes`,
+        );
+      return null;
+    }
+  };
+}
+
+/** When the registry of one mode last refreshed successfully (every row is stamped on each refresh); null = never. */
+export async function registryRefreshedAt(r: Rails, livemode: boolean): Promise<Date | null> {
+  const row = await r.db
+    .selectFrom("tokens")
+    .select((eb) => eb.fn.max("refreshed_at").as("at"))
+    .where("livemode", "=", livemode)
+    .executeTakeFirst();
+  return row?.at ? new Date(row.at as unknown as string | Date) : null;
+}
 
 /** Replaces the registry of one mode with the provider's list; tokens that disappeared are disabled. */
 export async function refreshTokens(r: Rails, livemode: boolean): Promise<number> {
