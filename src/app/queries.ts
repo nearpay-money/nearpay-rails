@@ -14,11 +14,11 @@ import type {
 } from "@nearpay-internal/spec";
 import type { RouteQuery, RouteResponse } from "@nearpay-money/spec";
 import { dualPrice, indicativeUsd, parCheck, pricesOf } from "../domain/pricing/pricing.js";
+import { optionReason } from "../domain/routing/health.js";
 import { routeClass, tokenContract } from "../domain/token-registry/registry.js";
 import type { Rails } from "./context.js";
-import { flag } from "./executions.js";
-import { readKillSwitch } from "./kill-switch.js";
 import { policyFor } from "./pricing.js";
+import { computeRoutingHealth } from "./routing-health.js";
 import { enabledTokens, publicAssets, tokenAnyMode } from "./tokens.js";
 import { executionView, pricedToken, type TokenRowDb } from "./views.js";
 
@@ -97,12 +97,12 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
   if (!d?.enabled) return { options: [] };
   const lm = livemode ?? d.livemode;
   const amountOut = BigInt(q.amount_out);
-  const crossChain = await flag(r, "cross_chain_enabled");
-  const quoting = lm ? (await readKillSwitch(r)) === "released" && r.treasury !== null : true;
+  // one place decides availability (domain/routing/health.ts): the same conditions as always, now with stable codes
+  // (`kill_switch_engaged`, `treasury_unset`, `cross_chain_paused`, `settlement_price_stale`, …) as the reason text
+  const health = await computeRoutingHealth(r, lm, { settlement: d, registry: false });
+  const routeReason = optionReason(health, "route_quote");
   const out: Option[] = [];
   const tokens = await enabledTokens(r, lm);
-  const p = await policyFor(r, lm);
-  const settleable = parCheck(pricedToken(d), p).ok || dualPrice(pricedToken(d), p).ok;
   for (const o of tokens) {
     if (q.chain && o.chain !== q.chain) continue;
     if (q.wallet && !validateAddress(o.chain, q.wallet).ok) continue;
@@ -110,13 +110,7 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
     if (!profile || !getChain(o.chain)) continue;
     const rc = routeClass(o, d);
     const bps = r.indicativeFeeBps[rc];
-    const reason = !quoting
-      ? "payments are paused"
-      : !crossChain
-        ? "cross-chain routes are paused"
-        : !settleable
-          ? "no reliable price for the settlement asset"
-          : null;
+    const reason = routeReason;
     out.push({
       method: "route_quote",
       origin_asset_id: o.asset_id,
@@ -135,6 +129,7 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
   if (q.destination_type === "intents_account" && (!q.chain || q.chain === "near:mainnet")) {
     const near = r.profiles.get("near:mainnet");
     const bps = r.indicativeFeeBps.intents_transfer;
+    const intentsReason = optionReason(health, "intents_transfer");
     out.unshift({
       method: "intents_transfer",
       origin_asset_id: d.asset_id,
@@ -145,8 +140,8 @@ export async function options(r: Rails, q: OptionsQuery): Promise<RouteResponse<
       route_class: "intents_transfer",
       applied_fee_bps: bps,
       min_deadline_s: near?.minDeadlineS ?? 120,
-      available: quoting && settleable,
-      reason: !quoting ? "payments are paused" : settleable ? null : "no reliable price for the settlement asset",
+      available: intentsReason === null,
+      reason: intentsReason,
       // paid from the payer's Intents balance: a Verifier transfer, no chain token recipe
       token: null,
     });

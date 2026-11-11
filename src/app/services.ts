@@ -79,7 +79,8 @@ import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
 import { alertStale, refreshEcb, refreshSecondary } from "./fx.js";
 import { killSwitchBootTask } from "./kill-switch.js";
-import { refreshTokens } from "./tokens.js";
+import { type RoutingMonitorOptions, routingHealthTask } from "./routing-health.js";
+import { monitoredRefresh, TOKEN_REFRESH_MS } from "./tokens.js";
 
 export const DEFAULT_CHAINS_FILE = fileURLToPath(new URL("../../config/chains.yaml", import.meta.url));
 
@@ -99,6 +100,8 @@ export interface ServiceDeps {
   fetch?: typeof fetch;
   random?: () => number;
   now?: () => number;
+  /** api: routing-health monitor cadence (tests shorten it). */
+  routingHealth?: RoutingMonitorOptions;
 }
 
 const usdMicros = (usd: number) => BigInt(Math.round(usd * 1_000_000));
@@ -319,6 +322,8 @@ export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service:
   attach(b, service, deps);
   // spec 0.2.1: learn sentinel's kill-switch state at boot (live quoting is refused while it is unknown)
   service.addBackground(killSwitchBootTask(b.rails));
+  // routing health: nearpay_rails_routing_* gauges and `ALERT routing_blocked` when live payments cannot route
+  service.addBackground(routingHealthTask(b.rails, deps.routingHealth ?? {}));
   return { service, rails: b.rails };
 }
 
@@ -476,7 +481,7 @@ export async function createFeeds(
   );
 
   const iv = {
-    tokens: 30_000,
+    tokens: TOKEN_REFRESH_MS,
     sandbox: 1_000,
     indexer: 1_000,
     watcher: 0,
@@ -497,12 +502,13 @@ export async function createFeeds(
     });
   };
 
+  const refresh = monitoredRefresh(r);
   service.addBackground(
     leader("token-refresh", (signal) =>
       loop(r, "token-refresh", signal, async () => {
         for (const lm of [false, true]) {
           if (!(lm ? r.providers.live : r.providers.test)) continue;
-          await refreshTokens(r, lm).catch((e) => r.log.warn({ err: e, livemode: lm }, "token refresh failed"));
+          await refresh(lm);
         }
         return iv.tokens;
       }),

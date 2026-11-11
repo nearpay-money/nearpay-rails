@@ -7,6 +7,7 @@
  * overrides a newer event. A response without `version` (sentinel 0.2.0) is stored as version 0.
  */
 import { sql } from "@nearpay-internal/db";
+import { alertLimiter, errorClass } from "../infra/clients/error-class.js";
 import type { Rails, Tx } from "./context.js";
 
 export type KillSwitchKnowledge = "engaged" | "released" | "unknown";
@@ -37,15 +38,44 @@ export async function storeKillSwitch(
 
 /** While the state stays unknown, sentinel is asked again at most this often per process. */
 export const READ_RETRY_MS = 10_000;
+/** A failing read logs `ALERT kill_switch_unknown` at once, then at most this often while it keeps failing. */
+export const UNKNOWN_ALERT_EVERY_MS = 5 * 60_000;
 const lastRead = new WeakMap<object, number>();
+const unknownAlerts = new WeakMap<object, ReturnType<typeof alertLimiter>>();
+
+function unknownAlert(r: Rails) {
+  let a = unknownAlerts.get(r);
+  if (!a) {
+    a = alertLimiter(UNKNOWN_ALERT_EVERY_MS, r.now);
+    unknownAlerts.set(r, a);
+  }
+  return a;
+}
 
 /**
  * Reads sentinel's state when the stored one is unknown and stores it. Never throws: a failed read leaves the
- * state unknown (live quoting stays refused). Returns the state afterwards.
+ * state unknown (live quoting stays refused) and logs `ALERT kill_switch_unknown` with why (rate-limited): `auth`
+ * (rails' service token refused: scope `sentinel.read`), `network:*` / `timeout` (sentinel unreachable),
+ * `http_<status>`, or `NP_SENTINEL_URL` unset. Returns the state afterwards.
  */
 export async function readKillSwitch(r: Rails, o: { force?: boolean } = {}): Promise<KillSwitchKnowledge> {
   const cur = await quotingState(r);
-  if (cur !== "unknown" || !r.sentinel) return cur;
+  const alert = unknownAlert(r);
+  if (cur !== "unknown") {
+    if (alert.active) {
+      r.log.info({ state: cur, failed_reads: alert.count }, "kill switch state known again: live quoting follows it");
+      alert.reset();
+    }
+    return cur;
+  }
+  if (!r.sentinel) {
+    if (alert.due())
+      r.log.warn(
+        { cause: "sentinel_url_unset", failed_reads: alert.count },
+        "ALERT kill_switch_unknown: NP_SENTINEL_URL is not set, so rails waits for an evt.sentinel.kill_switch.* event; live quoting stays refused until then",
+      );
+    return cur;
+  }
   const last = lastRead.get(r);
   if (!o.force && last !== undefined && r.now() - last < READ_RETRY_MS) return cur;
   lastRead.set(r, r.now());
@@ -58,12 +88,19 @@ export async function readKillSwitch(r: Rails, o: { force?: boolean } = {}): Pro
     });
     if (applied) r.log.warn({ engaged: k.engaged, version: k.version ?? null }, "kill switch state read from sentinel");
   } catch (e) {
-    r.log.warn(
-      { err: e instanceof Error ? e.message : String(e) },
-      "kill switch state could not be read from sentinel: live quoting stays refused while it is unknown",
-    );
+    const c = errorClass(e);
+    if (alert.due())
+      r.log.warn(
+        { cause: c.class, status: c.status, err: c.message, failed_reads: alert.count, retry_ms: READ_RETRY_MS },
+        "ALERT kill_switch_unknown: kill switch state could not be read from sentinel: live quoting stays refused while it is unknown",
+      );
   }
-  return quotingState(r);
+  const after = await quotingState(r);
+  if (after !== "unknown" && alert.active) {
+    r.log.info({ state: after, failed_reads: alert.count }, "kill switch state known again: live quoting follows it");
+    alert.reset();
+  }
+  return after;
 }
 
 /** Background task: reads the state at boot and retries while it stays unknown (api and feeds processes). */

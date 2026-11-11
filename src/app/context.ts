@@ -3,6 +3,7 @@ import type { Kysely, Transaction } from "@nearpay-internal/db";
 import type { Logger, ServiceMetrics } from "@nearpay-internal/service";
 import type { ProviderSplit } from "../domain/execution/integrity.js";
 import type { PolicyConfig } from "../domain/pricing/pricing.js";
+import { ROUTING_REASONS, type RoutingHealth } from "../domain/routing/health.js";
 import type { ChainProfiles } from "../domain/token-registry/chain-profiles.js";
 import type { RouteClass } from "../domain/token-registry/registry.js";
 import type { TierBLimits } from "../domain/verification/verification.js";
@@ -39,6 +40,13 @@ export interface RailsMetrics {
    * every Tier-A family settled on one-block evidence (EVM, Solana, Bitcoin).
    */
   finalityRecheck(chain: string, outcome: "finalized" | "failed" | "timeout"): void;
+  /**
+   * Routing health of one mode (app/routing-health.ts): `routing_available{livemode}` (0/1),
+   * `routing_blocked{livemode,reason}` (1 per blocking reason, 0 for every other code),
+   * `token_registry_age_seconds{livemode}` (+Inf = never refreshed) and
+   * `settlement_price_age_seconds{livemode,asset}` per settlement asset in use.
+   */
+  routingHealth(h: RoutingHealth, priceAges: ReadonlyMap<string, number>): void;
 }
 
 export const noMetrics: RailsMetrics = {
@@ -58,6 +66,7 @@ export const noMetrics: RailsMetrics = {
   chainRpcCall() {},
   vaultEvent() {},
   finalityRecheck() {},
+  routingHealth() {},
 };
 
 export function railsMetrics(m: ServiceMetrics): RailsMetrics {
@@ -111,6 +120,26 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
     ["chain", "outcome"],
   );
   const lag = m.gauge("tracker_lag_blocks", "Blocks between the chain's final head and a tracker cursor.", ["tracker"]);
+  const routingAvailable = m.gauge(
+    "routing_available",
+    "1 when payments of the mode can be routed, 0 when every option is unavailable (see routing_blocked).",
+    ["livemode"],
+  );
+  const routingBlocked = m.gauge(
+    "routing_blocked",
+    "1 for each reason that currently blocks routing in the mode (kill_switch_engaged, treasury_unset, …).",
+    ["livemode", "reason"],
+  );
+  const registryAge = m.gauge(
+    "token_registry_age_seconds",
+    "Seconds since the mode's token registry last refreshed from its provider (+Inf = never).",
+    ["livemode"],
+  );
+  const priceAge = m.gauge(
+    "settlement_price_age_seconds",
+    "Seconds since the primary price of a settlement asset in use applied (provider timestamp).",
+    ["livemode", "asset"],
+  );
   return {
     quote: (provider, outcome, s) => quote.observe({ provider, outcome }, s),
     statusCall: (source, outcome) => status.inc({ source, outcome }),
@@ -135,6 +164,15 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
         ? vaultForwarded.inc({ outcome })
         : vaultRejected.inc({ reason: outcome }),
     finalityRecheck: (chain, outcome) => recheck.inc({ chain, outcome }),
+    routingHealth: (h, ages) => {
+      const livemode = String(h.livemode);
+      routingAvailable.set({ livemode }, h.available ? 1 : 0);
+      const blocking = new Set(h.reasons);
+      for (const reason of ROUTING_REASONS)
+        if (reason !== "token_registry_stale") routingBlocked.set({ livemode, reason }, blocking.has(reason) ? 1 : 0);
+      if (h.registryAgeS !== null) registryAge.set({ livemode }, h.registryAgeS);
+      for (const [asset, age] of ages) priceAge.set({ livemode, asset }, age);
+    },
   };
 }
 
