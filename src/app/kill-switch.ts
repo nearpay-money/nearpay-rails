@@ -18,6 +18,7 @@
  * changes only the value (emergency override), so the next newer sentinel state — event or periodic read — wins.
  */
 import { sql } from "@nearpay-internal/db";
+import type { BackgroundTask, Heartbeat } from "@nearpay-internal/service";
 import { compareKillSwitchCopy, DIVERGENCE_FIX, type KillSwitchCopy } from "../domain/routing/kill-switch-copy.js";
 import { alertLimiter, errorClass } from "../infra/clients/error-class.js";
 import type { Rails, Tx } from "./context.js";
@@ -248,10 +249,13 @@ export async function syncKillSwitch(r: Rails, o: { force?: boolean } = {}): Pro
  * Background task (api and feeds): reads the state at boot, retries every {@link READ_RETRY_MS} while it stays
  * unknown, then keeps re-reading every {@link RESYNC_MS} (periodic read) and refreshes the copy's gauges.
  */
-export function killSwitchSyncTask(r: Rails, o: { tickMs?: number } = {}) {
+export function killSwitchSyncTask(r: Rails, o: { tickMs?: number } = {}): BackgroundTask {
+  const tickMs = o.tickMs ?? READ_RETRY_MS;
   return {
     name: "kill-switch-sync",
-    start() {
+    // kit 0.6.0 liveness: a tick that never settles fails /healthz (failed sentinel reads still beat)
+    maxSilenceMs: Math.max(12 * tickMs, 120_000),
+    start(heartbeat?: Heartbeat) {
       let stopped = false;
       let timer: NodeJS.Timeout | null = null;
       let first = true;
@@ -262,7 +266,8 @@ export function killSwitchSyncTask(r: Rails, o: { tickMs?: number } = {}) {
         first = false;
         if (st !== "unknown" && !known) r.log.info({ state: st }, "kill switch state known");
         known = st !== "unknown";
-        if (!stopped) timer = setTimeout(tick, o.tickMs ?? READ_RETRY_MS);
+        heartbeat?.beat();
+        if (!stopped) timer = setTimeout(tick, tickMs);
       };
       void tick();
       return {

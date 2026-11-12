@@ -20,6 +20,7 @@
 
 import { sql } from "@nearpay-internal/db";
 import { parseEventLogs } from "@nearpay-internal/intents";
+import type { BackgroundTask, Heartbeat } from "@nearpay-internal/service";
 import { verificationTier } from "../app/chain-tier.js";
 import type { Rails } from "../app/context.js";
 import { applyChange, lockExecution } from "../app/ledger.js";
@@ -439,7 +440,8 @@ async function claimVerifications(r: Rails, limit: number): Promise<ExecutionRow
   return res.rows;
 }
 
-export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20): Promise<number> {
+/** One verifier pass over due executions; `beat` (liveness) is called after every execution. */
+export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20, beat?: () => void): Promise<number> {
   const rows = await claimVerifications(r, batch);
   for (const row of rows) {
     let v: VerifyOutcome;
@@ -512,22 +514,36 @@ export async function verifyOnce(r: Rails, deps: VerifierDeps, batch = 20): Prom
         },
       );
     });
+    beat?.();
   }
   return rows.length;
 }
 
-export function verifierTask(r: Rails, deps: VerifierDeps, o: { tickMs?: number } = {}) {
+/**
+ * Liveness budget of the verifier (kit 0.6.0, KIT-4): it beats after every tick and every verified execution; one
+ * execution's evidence reads (RPC pools with 3–5 s timeouts and fallbacks) stay well inside it.
+ */
+export const VERIFIER_MAX_SILENCE_MS = 180_000;
+
+export function verifierTask(
+  r: Rails,
+  deps: VerifierDeps,
+  o: { tickMs?: number; maxSilenceMs?: number } = {},
+): BackgroundTask {
   return {
     name: "verifier",
-    start() {
+    maxSilenceMs: o.maxSilenceMs ?? VERIFIER_MAX_SILENCE_MS,
+    start(heartbeat?: Heartbeat) {
+      const beat = () => heartbeat?.beat();
       let stopped = false;
       let timer: NodeJS.Timeout | undefined;
       let running: Promise<void> = Promise.resolve();
       const tick = () => {
         if (stopped) return;
-        running = verifyOnce(r, deps)
+        running = verifyOnce(r, deps, 20, beat)
           .catch((e) => r.log.error({ err: e }, "verifier tick failed"))
           .then(() => {
+            beat();
             if (!stopped) timer = setTimeout(tick, o.tickMs ?? VERIFIER_TICK_MS);
           });
       };
