@@ -74,13 +74,13 @@ What to read to check the one-block confirmation rule (ADR-0022): `config/chains
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| `pnpm install --frozen-lockfile` | Install; NearPay packages come from the local registry (see "Verify this repo") |
-| `pnpm test` | Unit and property tests |
-| `pnpm test:integration` | Integration and contract tests: Postgres, NATS, the `nearpay/sandbox:local` image and Anvil in Testcontainers (needs Docker; build the sandbox image first) |
-| `pnpm verify` | typecheck + lint + unit tests with the coverage gate + integration tests + build |
-| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/rails:local .` | Image (what nearpay-deploy's `scripts/up.sh` runs) |
+| Command                                                                                                  | What it does                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile`                                                                         | Install; NearPay packages come from the local registry (see "Verify this repo")                                                                             |
+| `pnpm test`                                                                                              | Unit and property tests                                                                                                                                     |
+| `pnpm test:integration`                                                                                  | Integration and contract tests: Postgres, NATS, the `nearpay/sandbox:local` image and Anvil in Testcontainers (needs Docker; build the sandbox image first) |
+| `pnpm verify`                                                                                            | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                            |
+| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/rails:local .` | Image (what nearpay-deploy's `scripts/up.sh` runs)                                                                                                          |
 
 ## Configuration
 
