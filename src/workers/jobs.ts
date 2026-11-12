@@ -45,8 +45,8 @@ export function jobHandlers(r: Rails, o: { archive?: ArchiveStore | null } = {})
     "kit.purge": async () => {
       r.log.info(await purgeKitTables(r.db), "kit tables purged");
     },
-    "observations.archive": async () => {
-      const n = await archiveObservations(r, o.archive ?? null);
+    "observations.archive": async (_payload, ctx) => {
+      const n = await archiveObservations(r, o.archive ?? null, 50, () => ctx.extendLease());
       if (n) r.log.info({ archived: n }, "observation archive run");
     },
   };
