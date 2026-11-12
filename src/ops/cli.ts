@@ -6,13 +6,16 @@
  * operator control for pausing cross-chain routes (and, in an emergency, quoting) locally.
  */
 import { parseArgs } from "node:util";
+import { DEAD_LETTER_USAGE, DeadLetterError, KitOpsUsageError, runKitOps } from "@nearpay-internal/db";
 import { isId, toUuid } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
+import type { Subject } from "@nearpay-internal/spec";
 import type { Rails } from "../app/context.js";
 import { refreshMinimums } from "../app/minimums.js";
 import { computeRoutingHealth, explainHealth } from "../app/routing-health.js";
 import { refreshTokens } from "../app/tokens.js";
 import { executionView } from "../app/views.js";
+import { railsHandlers } from "../consumers/handlers.js";
 
 export const USAGE = `usage: ops.js <command> [arguments]
 
@@ -21,7 +24,10 @@ export const USAGE = `usage: ops.js <command> [arguments]
   flag-set <quoting_enabled|cross_chain_enabled> <true|false> <reason…>
   tokens-refresh [live|test]                reload a token registry from its provider now
   minimums-refresh                          recompute destination minimums now
-  routing-health [live|test]                can payments route now? blocking reasons with the fix for each`;
+  routing-health [live|test]                can payments route now? blocking reasons with the fix for each
+
+dead letters and the outbox (kit 0.6.0):
+${DEAD_LETTER_USAGE}`;
 
 class UsageError extends Error {}
 
@@ -33,21 +39,51 @@ export interface OpsDeps {
   err?: (line: string) => void;
 }
 
+const KIT_COMMANDS = new Set(["dead-letters", "outbox"]);
+
+/** `dead-letters …` / `outbox …` (kit `runKitOps`): consumer dead letters replay through the feeds handlers (inbox-deduped). */
+function kitOps(r: Rails, argv: readonly string[], actor: string): Promise<unknown> {
+  const handlers = railsHandlers(r.db);
+  return runKitOps(r.db, argv[0] as string, argv.slice(1), {
+    actor,
+    handlers: {
+      consumer: async (e) => {
+        const h = handlers[e.subject as Subject];
+        if (!h) throw new DeadLetterError("no_handler", `rails does not consume ${e.subject}`);
+        await h(e);
+      },
+    },
+  });
+}
+
 export async function runOps(argv: readonly string[], r: Rails, deps: OpsDeps): Promise<number> {
   const out = deps.out ?? ((l: string) => process.stdout.write(`${l}\n`));
   const err = deps.err ?? ((l: string) => process.stderr.write(`${l}\n`));
   try {
+    if (KIT_COMMANDS.has(argv[0] ?? "")) {
+      const result = await kitOps(r, argv, deps.actor);
+      out(JSON.stringify(result, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+      return 0;
+    }
     const { positionals } = parseArgs({ args: [...argv], allowPositionals: true, strict: true, options: {} });
     const [cmd, ...args] = positionals;
     const result = await run(r, cmd, args, deps.actor);
     out(JSON.stringify(result, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2));
     return 0;
   } catch (e) {
-    if (e instanceof UsageError || (e as { code?: string }).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION") {
+    if (
+      e instanceof UsageError ||
+      e instanceof KitOpsUsageError ||
+      (e as { code?: string }).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
+    ) {
       err(`${e instanceof Error ? e.message : String(e)}\n\n${USAGE}`);
       return 2;
     }
-    err(JSON.stringify({ error: e instanceof ApiError ? { code: e.code, message: e.message } : String(e) }));
+    err(
+      JSON.stringify({
+        error: e instanceof ApiError || e instanceof DeadLetterError ? { code: e.code, message: e.message } : String(e),
+      }),
+    );
     return 1;
   }
 }

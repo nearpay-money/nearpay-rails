@@ -5,6 +5,7 @@
  * transaction. `direct_intents` executions have no provider: the poller only expires them.
  */
 import { sql } from "@nearpay-internal/db";
+import type { BackgroundTask, Heartbeat } from "@nearpay-internal/service";
 import type { Rails } from "../../app/context.js";
 import { applyChange, lockExecution } from "../../app/ledger.js";
 import { applyStatus, scheduleFor } from "../../app/observations.js";
@@ -141,8 +142,11 @@ async function reschedule(r: Rails, row: ExecutionRow, inMs: number): Promise<vo
     .execute();
 }
 
-/** One poller tick: claims up to `batch` due executions and polls them. Returns executions handled. */
-export async function pollOnce(r: Rails, batch = 50): Promise<number> {
+/**
+ * One poller tick: claims up to `batch` due executions and polls them. Returns executions handled. `beat` (liveness)
+ * is called after every execution, so a full batch of slow provider calls never looks like a hung loop.
+ */
+export async function pollOnce(r: Rails, batch = 50, beat?: () => void): Promise<number> {
   const rows = await claimDue(r, batch);
   let budgetOut = false;
   for (const row of rows) {
@@ -156,25 +160,36 @@ export async function pollOnce(r: Rails, batch = 50): Promise<number> {
       r.log.warn({ err: e, execution: row.id }, "poll failed");
       await reschedule(r, row, 15_000).catch(() => {});
     }
+    beat?.();
   }
   return rows.length;
 }
 
-export function pollerTask(r: Rails, o: { tickMs?: number; batch?: number } = {}) {
+/** Liveness budget of the hot poller (kit 0.6.0, KIT-4): it beats after every tick and every polled execution. */
+export const POLLER_MAX_SILENCE_MS = 120_000;
+
+export function pollerTask(
+  r: Rails,
+  o: { tickMs?: number; batch?: number; maxSilenceMs?: number } = {},
+): BackgroundTask {
   return {
     name: "hot-poller",
-    start() {
+    maxSilenceMs: o.maxSilenceMs ?? POLLER_MAX_SILENCE_MS,
+    start(heartbeat?: Heartbeat) {
+      const beat = () => heartbeat?.beat();
       let stopped = false;
       let timer: NodeJS.Timeout | undefined;
       let running: Promise<void> = Promise.resolve();
       const tick = () => {
         if (stopped) return;
-        running = pollOnce(r, o.batch ?? 50)
+        running = pollOnce(r, o.batch ?? 50, beat)
           .then((n) => {
+            beat();
             if (!stopped) timer = setTimeout(tick, n >= (o.batch ?? 50) ? 0 : (o.tickMs ?? 500));
           })
           .catch((e) => {
             r.log.error({ err: e }, "hot poller tick failed");
+            beat(); // a failed tick (e.g. DB down) is readiness, not liveness
             if (!stopped) timer = setTimeout(tick, 2_000);
           });
       };

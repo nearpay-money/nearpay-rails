@@ -21,6 +21,7 @@
  */
 
 import { sql } from "@nearpay-internal/db";
+import type { BackgroundTask, Heartbeat } from "@nearpay-internal/service";
 import { BITCOIN_MAINNET, SOLANA_MAINNET } from "@nearpay-money/spec";
 import type { Rails } from "../app/context.js";
 import { type RecheckFamily, recheckPlan } from "../app/finality.js";
@@ -221,14 +222,20 @@ async function recheckRow(r: Rails, readers: RecheckReaders, row: ExecutionRow):
   return recheckFinality(rpc, { txHash, blockHash, blockRef });
 }
 
-/** One pass over due re-checks; returns rows handled. */
-export async function finalityRecheckOnce(r: Rails, readers: RecheckReaders, batch = 20): Promise<number> {
+/** One pass over due re-checks; returns rows handled. `beat` (liveness) is called after every row. */
+export async function finalityRecheckOnce(
+  r: Rails,
+  readers: RecheckReaders,
+  batch = 20,
+  beat?: () => void,
+): Promise<number> {
   const rows = await claim(r, batch);
   for (const row of rows) {
     const v: RecheckVerdict = await recheckRow(r, readers, row).catch((e: unknown) => ({
       kind: "pending" as const,
       detail: { reason: e instanceof Error ? e.message : String(e) },
     }));
+    beat?.();
     if (v.kind === "finalized" || v.kind === "failed") {
       await finish(r, row, v.kind, v.detail);
       continue;
@@ -252,19 +259,29 @@ export async function finalityRecheckOnce(r: Rails, readers: RecheckReaders, bat
   return rows.length;
 }
 
-export function finalityRecheckTask(r: Rails, readers: RecheckReaders, o: { tickMs?: number } = {}) {
+/** Liveness budget of the finality re-check loop (kit 0.6.0, KIT-4): beats after every tick and every row. */
+export const FINALITY_RECHECK_MAX_SILENCE_MS = 120_000;
+
+export function finalityRecheckTask(
+  r: Rails,
+  readers: RecheckReaders,
+  o: { tickMs?: number; maxSilenceMs?: number } = {},
+): BackgroundTask {
   return {
     name: "finality-recheck",
-    start() {
+    maxSilenceMs: o.maxSilenceMs ?? FINALITY_RECHECK_MAX_SILENCE_MS,
+    start(heartbeat?: Heartbeat) {
+      const beat = () => heartbeat?.beat();
       let stopped = false;
       let timer: NodeJS.Timeout | undefined;
       let running: Promise<void> = Promise.resolve();
       const tick = () => {
         if (stopped) return;
-        running = finalityRecheckOnce(r, readers)
+        running = finalityRecheckOnce(r, readers, 20, beat)
           .then(() => undefined)
           .catch((e) => r.log.error({ err: e }, "finality re-check tick failed"))
           .then(() => {
+            beat();
             if (!stopped) timer = setTimeout(tick, o.tickMs ?? 5_000);
           });
       };
