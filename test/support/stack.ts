@@ -147,7 +147,8 @@ export interface Stack {
   readonly compliance: MockPeer;
   /** Sentinel mock answering `getKillSwitch` (spec 0.2.1) with {@link Stack.killSwitch}. */
   readonly sentinel: MockPeer;
-  readonly killSwitch: { engaged: boolean; version: number; fail: boolean };
+  /** `updatedAt` null = now; `reads` counts getKillSwitch calls. */
+  readonly killSwitch: { engaged: boolean; version: number; fail: boolean; updatedAt: string | null; reads: number };
   readonly sandbox: Sandbox | null;
   readonly nats: (Started & { monitorUrl: string }) | null;
   readonly bus: Bus | null;
@@ -205,15 +206,16 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     post_screen_required: false,
   }));
 
-  const killSwitch = { engaged: false, version: 0, fail: false };
+  const killSwitch: Stack["killSwitch"] = { engaged: false, version: 0, fail: false, updatedAt: null, reads: 0 };
   const sentinel = await mockPeer({ service: "sentinel", routes: INTERNAL_ROUTES });
   sentinel.on(getKillSwitch, async () => {
+    killSwitch.reads++;
     if (killSwitch.fail) throw mockError("rail_unavailable");
     return {
       engaged: killSwitch.engaged,
       reason: "test",
       actor: "sentinel",
-      updated_at: new Date().toISOString(),
+      updated_at: killSwitch.updatedAt ?? new Date().toISOString(),
       version: killSwitch.version,
     };
   });

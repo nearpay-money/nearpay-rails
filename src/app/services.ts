@@ -78,7 +78,7 @@ import { verifierTask } from "../verifiers/verifier.js";
 import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
 import { alertStale, refreshEcb, refreshSecondary } from "./fx.js";
-import { killSwitchBootTask } from "./kill-switch.js";
+import { killSwitchSyncTask } from "./kill-switch.js";
 import { type RoutingMonitorOptions, routingHealthTask } from "./routing-health.js";
 import { monitoredRefresh, TOKEN_REFRESH_MS } from "./tokens.js";
 
@@ -320,8 +320,8 @@ export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service:
     readiness: readiness(b.database),
   });
   attach(b, service, deps);
-  // spec 0.2.1: learn sentinel's kill-switch state at boot (live quoting is refused while it is unknown)
-  service.addBackground(killSwitchBootTask(b.rails));
+  // spec 0.2.1 + RAILS-1: learn sentinel's kill-switch state at boot and re-read it every 60 s (missed events self-heal)
+  service.addBackground(killSwitchSyncTask(b.rails));
   // routing health: nearpay_rails_routing_* gauges and `ALERT routing_blocked` when live payments cannot route
   service.addBackground(routingHealthTask(b.rails, deps.routingHealth ?? {}));
   return { service, rails: b.rails };
@@ -447,7 +447,7 @@ export async function createFeeds(
   service.addBackground(
     domainConsumersTask({ bus, consumer: "rails", handlers, onDeadLetter: deadLetters(db.db), onError }),
   );
-  service.addBackground(killSwitchBootTask(r));
+  service.addBackground(killSwitchSyncTask(r));
   const archive =
     deps.archive !== undefined
       ? deps.archive

@@ -9,7 +9,7 @@ import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { Execution } from "@nearpay-internal/spec";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { readKillSwitch } from "../../src/app/kill-switch.js";
+import { readKillSwitch, storeKillSwitch, syncKillSwitch } from "../../src/app/kill-switch.js";
 import { refreshTokens } from "../../src/app/tokens.js";
 import { type EvmRpc, evmRpc } from "../../src/infra/clients/evm.js";
 import { explorer } from "../../src/infra/clients/explorer.js";
@@ -463,6 +463,97 @@ describe("routing health (stable reasons, gauges, ALERT lines)", () => {
       logs.restore();
       s.killSwitch.fail = false;
       await readKillSwitch(s.rails, { force: true });
+    }
+  });
+
+  it("periodic read (RAILS-1): a missed release or engage self-heals, an older answer never wins, a failed re-read keeps the state", async () => {
+    const copyRow = () =>
+      s.admin.db
+        .selectFrom("control_flags")
+        .select(["value", "known", "source_version"])
+        .where("name", "=", "quoting_enabled")
+        .executeTakeFirstOrThrow();
+    const logs = captureLogs();
+    const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    try {
+      // rails holds engaged v5; sentinel released v6 ten minutes ago and the event never arrived
+      await s.admin.db
+        .updateTable("control_flags")
+        .set({ value: false, known: true, source_version: 5 })
+        .where("name", "=", "quoting_enabled")
+        .execute();
+      Object.assign(s.killSwitch, { engaged: false, version: 6, updatedAt: longAgo });
+      expect(await readKillSwitch(s.rails)).toBe("engaged"); // the quote path does not ask sentinel while known
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(await copyRow()).toMatchObject({ value: true, known: true, source_version: 6 });
+      const healed = logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_copy_diverged"));
+      expect(healed).toMatchObject({ level: "warn", fields: { cause: "copy_behind", resolved: true } });
+      expect(await gauge("nearpay_rails_kill_switch_version")).toBe(6);
+      expect(await gauge("nearpay_rails_kill_switch_source_version")).toBe(6);
+      expect(await gauge("nearpay_rails_kill_switch_engaged")).toBe(0);
+      expect(await gauge("nearpay_rails_kill_switch_diverged")).toBe(0);
+      expect(await gauge("nearpay_rails_kill_switch_last_read_timestamp_seconds")).toBeGreaterThan(
+        Date.now() / 1000 - 60,
+      );
+      expect(await reasons()).toEqual(["available"]);
+
+      // within 60 s a non-forced sync does not ask sentinel again
+      const reads = s.killSwitch.reads;
+      expect(await syncKillSwitch(s.rails)).toBe("released");
+      expect(s.killSwitch.reads).toBe(reads);
+
+      // the reverse: a missed engage (v7) stops live quoting at the next read
+      Object.assign(s.killSwitch, { engaged: true, version: 7 });
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(await reasons()).toEqual(["kill_switch_engaged"]);
+
+      // sentinel answers an older version (restored database): no change, ALERT with the cause, diverged = 1
+      logs.lines.length = 0;
+      Object.assign(s.killSwitch, { engaged: false, version: 4 });
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(await copyRow()).toMatchObject({ value: false, source_version: 7 });
+      expect(logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_copy_diverged"))).toMatchObject({
+        fields: { cause: "sentinel_behind" },
+      });
+      expect(await gauge("nearpay_rails_kill_switch_diverged")).toBe(1);
+      expect(await gauge("nearpay_rails_kill_switch_source_version")).toBe(4);
+
+      // an event older than the copy never applies either
+      expect(await storeKillSwitch(s.rails.db, { engaged: false, version: 6, reason: "late event" })).toBe(false);
+
+      // sentinel unreachable while known: the state stays (never unknown), a warning, no ALERT kill_switch_unknown
+      logs.lines.length = 0;
+      s.killSwitch.fail = true;
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(logs.lines.some((l) => l.msg.startsWith("kill switch could not be re-read"))).toBe(true);
+      expect(logs.lines.some((l) => l.msg.startsWith("ALERT kill_switch_unknown"))).toBe(false);
+      s.killSwitch.fail = false;
+
+      // operator override (flag-set) at the same version: kept, reported as value_overridden; sentinel's next
+      // release replaces it and the copy agrees again
+      Object.assign(s.killSwitch, { engaged: true, version: 7 });
+      await setFlag("quoting_enabled", true);
+      logs.lines.length = 0;
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_copy_diverged"))).toMatchObject({
+        fields: { cause: "value_overridden" },
+      });
+      Object.assign(s.killSwitch, { engaged: false, version: 8, updatedAt: null });
+      logs.lines.length = 0;
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(await copyRow()).toMatchObject({ value: true, source_version: 8 });
+      expect(await gauge("nearpay_rails_kill_switch_diverged")).toBe(0);
+      // sentinel changed just now: its event is still in flight, so no ALERT; the divergence cleared
+      expect(logs.lines.some((l) => l.msg.startsWith("ALERT"))).toBe(false);
+      expect(logs.lines.some((l) => l.msg === "kill switch copy agrees with sentinel again")).toBe(true);
+    } finally {
+      logs.restore();
+      Object.assign(s.killSwitch, { engaged: false, version: 0, fail: false, updatedAt: null });
+      await s.admin.db
+        .updateTable("control_flags")
+        .set({ value: true, known: true, source_version: 0 })
+        .where("name", "=", "quoting_enabled")
+        .execute();
     }
   });
 });

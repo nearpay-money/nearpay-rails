@@ -47,6 +47,18 @@ export interface RailsMetrics {
    * `settlement_price_age_seconds{livemode,asset}` per settlement asset in use.
    */
   routingHealth(h: RoutingHealth, priceAges: ReadonlyMap<string, number>): void;
+  /**
+   * Kill-switch copy (app/kill-switch.ts, lld/rails.md §7 periodic read), only in the processes that keep it (api,
+   * feeds): `kill_switch_engaged` (1 = live quoting refused by the copy: engaged or unknown) and
+   * `kill_switch_version` (the sentinel version the copy came from; -1 = unknown).
+   */
+  killSwitchCopy(c: { engaged: boolean; version: number | null }): void;
+  /**
+   * Sentinel's answer at the last successful read: `kill_switch_source_engaged`, `kill_switch_source_version`
+   * (-1 = sentinel sent none), `kill_switch_last_read_timestamp_seconds`, and `kill_switch_diverged` (1 when the copy
+   * still differs from that answer after the read was applied — deploy alert `KillSwitchCopyDiverged`).
+   */
+  killSwitchSource(s: { engaged: boolean; version: number | null; readAtMs: number; diverged: boolean }): void;
 }
 
 export const noMetrics: RailsMetrics = {
@@ -67,6 +79,8 @@ export const noMetrics: RailsMetrics = {
   vaultEvent() {},
   finalityRecheck() {},
   routingHealth() {},
+  killSwitchCopy() {},
+  killSwitchSource() {},
 };
 
 export function railsMetrics(m: ServiceMetrics): RailsMetrics {
@@ -140,6 +154,40 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
     "Seconds since the primary price of a settlement asset in use applied (provider timestamp).",
     ["livemode", "asset"],
   );
+  // registered on first use, so processes without a kill-switch copy (tracker) export no misleading zeros
+  let ks: Record<
+    "engaged" | "version" | "srcEngaged" | "srcVersion" | "diverged" | "readAt",
+    ReturnType<typeof m.gauge>
+  > | null = null;
+  const ksGauges = () => {
+    ks ??= {
+      engaged: m.gauge(
+        "kill_switch_engaged",
+        "1 while rails' copy of sentinel's kill switch refuses live quoting (engaged, or state unknown).",
+      ),
+      version: m.gauge(
+        "kill_switch_version",
+        "Sentinel kill-switch version rails' copy came from (control_flags.source_version; -1 = unknown).",
+      ),
+      srcEngaged: m.gauge(
+        "kill_switch_source_engaged",
+        "Sentinel's kill switch at rails' last successful read (1 = engaged).",
+      ),
+      srcVersion: m.gauge(
+        "kill_switch_source_version",
+        "Sentinel's kill-switch version at rails' last successful read (-1 = sentinel sent none).",
+      ),
+      diverged: m.gauge(
+        "kill_switch_diverged",
+        "1 when rails' kill-switch copy still differs from sentinel after the last read was applied (alert).",
+      ),
+      readAt: m.gauge(
+        "kill_switch_last_read_timestamp_seconds",
+        "Unix time of rails' last successful read of sentinel's kill switch.",
+      ),
+    };
+    return ks;
+  };
   return {
     quote: (provider, outcome, s) => quote.observe({ provider, outcome }, s),
     statusCall: (source, outcome) => status.inc({ source, outcome }),
@@ -172,6 +220,18 @@ export function railsMetrics(m: ServiceMetrics): RailsMetrics {
         if (reason !== "token_registry_stale") routingBlocked.set({ livemode, reason }, blocking.has(reason) ? 1 : 0);
       if (h.registryAgeS !== null) registryAge.set({ livemode }, h.registryAgeS);
       for (const [asset, age] of ages) priceAge.set({ livemode, asset }, age);
+    },
+    killSwitchCopy: (c) => {
+      const g = ksGauges();
+      g.engaged.set(c.engaged ? 1 : 0);
+      g.version.set(c.version ?? -1);
+    },
+    killSwitchSource: (x) => {
+      const g = ksGauges();
+      g.srcEngaged.set(x.engaged ? 1 : 0);
+      g.srcVersion.set(x.version ?? -1);
+      g.diverged.set(x.diverged ? 1 : 0);
+      g.readAt.set(Math.floor(x.readAtMs / 1000));
     },
   };
 }
