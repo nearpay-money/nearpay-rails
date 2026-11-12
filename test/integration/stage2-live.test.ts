@@ -28,7 +28,7 @@ import { refreshTokens } from "../../src/app/tokens.js";
 import { decodeObservations } from "../../src/archive/parquet.js";
 import { fileStore } from "../../src/archive/store.js";
 import { parseEcbDaily } from "../../src/domain/pricing/ecb.js";
-import { isTargetClosingDay } from "../../src/domain/pricing/target-calendar.js";
+import { berlinInstant, isTargetClosingDay } from "../../src/domain/pricing/target-calendar.js";
 import { explorer } from "../../src/infra/clients/explorer.js";
 import { verifierNonces } from "../../src/infra/clients/nonces.js";
 import { coingeckoProvider } from "../../src/providers/prices/coingecko.js";
@@ -45,12 +45,15 @@ let s: Stack;
 let one: FakeOneClick;
 const archiveDir = mkdtempSync(join(tmpdir(), "rails-archive-int-"));
 
-/** The ECB fixture re-dated to the latest TARGET working day (the bound is calendar-relative). */
+/**
+ * The ECB fixture re-dated to the latest published reference day: the latest TARGET working day whose 16:00
+ * Europe/Berlin publication has passed. A rate is valid until the next publication (plus grace), so before today's
+ * publication that is the previous working day, and from 16:00 on it is today — at any time of day.
+ */
 function ecbFixture(): string {
+  const published = (day: string) => !isTargetClosingDay(day) && berlinInstant(day, 16).getTime() <= Date.now();
   let d = new Date();
-  // before today's 16:00 CET publication the previous working day is the latest
-  d = new Date(d.getTime() - 86_400_000);
-  while (isTargetClosingDay(d.toISOString().slice(0, 10))) d = new Date(d.getTime() - 86_400_000);
+  while (!published(d.toISOString().slice(0, 10))) d = new Date(d.getTime() - 86_400_000);
   const xml = readFileSync(new URL("../fixtures/ecb/eurofxref-daily-2026-11-06.xml", import.meta.url), "utf8");
   return xml.replace("2026-11-06", d.toISOString().slice(0, 10));
 }
