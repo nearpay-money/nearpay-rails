@@ -1,4 +1,7 @@
-/** Sentinel `getKillSwitch` (spec 0.2.1, service scope `sentinel.read`): read at boot while the local state is unknown. */
+/**
+ * Sentinel `getKillSwitch` (spec 0.2.1, service scope `sentinel.read`): read at boot while the local state is unknown,
+ * then every 60 s (periodic read, lld/rails.md §7).
+ */
 import { httpClient } from "@nearpay-internal/http";
 import { getKillSwitch } from "@nearpay-internal/spec";
 
@@ -8,6 +11,8 @@ export interface KillSwitchRead {
   readonly actor: string;
   /** Envelope `aggregate.version` of sentinel's latest kill-switch event; absent from sentinel 0.2.0. */
   readonly version?: number | undefined;
+  /** When sentinel's state last changed (ISO-8601). */
+  readonly updated_at?: string | undefined;
 }
 
 export interface SentinelClient {

@@ -48,7 +48,7 @@ import {
   type TrackerConfig,
 } from "../config.js";
 import { deadLetters, railsHandlers } from "../consumers/handlers.js";
-import { DEFAULT_POLICY } from "../domain/pricing/pricing.js";
+import { DEFAULT_POLICY, secondaryBackoff } from "../domain/pricing/pricing.js";
 import { type ChainProfiles, chainProfiles } from "../domain/token-registry/chain-profiles.js";
 import { type Budgets, budgets as createBudgets } from "../infra/budget.js";
 import { complianceScreening, type Screening } from "../infra/clients/compliance.js";
@@ -78,7 +78,7 @@ import { verifierTask } from "../verifiers/verifier.js";
 import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { noMetrics, type Providers, type Rails, railsMetrics } from "./context.js";
 import { alertStale, refreshEcb, refreshSecondary } from "./fx.js";
-import { killSwitchBootTask } from "./kill-switch.js";
+import { killSwitchSyncTask } from "./kill-switch.js";
 import { type RoutingMonitorOptions, routingHealthTask } from "./routing-health.js";
 import { monitoredRefresh, TOKEN_REFRESH_MS } from "./tokens.js";
 
@@ -320,8 +320,8 @@ export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service:
     readiness: readiness(b.database),
   });
   attach(b, service, deps);
-  // spec 0.2.1: learn sentinel's kill-switch state at boot (live quoting is refused while it is unknown)
-  service.addBackground(killSwitchBootTask(b.rails));
+  // spec 0.2.1 + RAILS-1: learn sentinel's kill-switch state at boot and re-read it every 60 s (missed events self-heal)
+  service.addBackground(killSwitchSyncTask(b.rails));
   // routing health: nearpay_rails_routing_* gauges and `ALERT routing_blocked` when live payments cannot route
   service.addBackground(routingHealthTask(b.rails, deps.routingHealth ?? {}));
   return { service, rails: b.rails };
@@ -447,7 +447,7 @@ export async function createFeeds(
   service.addBackground(
     domainConsumersTask({ bus, consumer: "rails", handlers, onDeadLetter: deadLetters(db.db), onError }),
   );
-  service.addBackground(killSwitchBootTask(r));
+  service.addBackground(killSwitchSyncTask(r));
   const archive =
     deps.archive !== undefined
       ? deps.archive
@@ -514,7 +514,8 @@ export async function createFeeds(
       }),
     ),
   );
-  // secondary prices (live, CoinGecko keyless): 60 s; 429 → back off ×2 up to 10 min (§9)
+  // secondary prices (live, CoinGecko keyless): 60 s; 429 → back off ×2, capped at half the secondary freshness
+  // window (150 s) with jitter, so the stored secondary never goes stale only because of the back-off (RAILS-2)
   const prices =
     deps.prices !== undefined
       ? deps.prices
@@ -531,8 +532,14 @@ export async function createFeeds(
             backoff = iv.prices;
           } catch (e) {
             if (!(e instanceof PriceRateLimited)) throw e;
-            backoff = Math.min(backoff * 2, 600_000);
-            r.log.warn({ delay_ms: backoff }, "secondary price feed rate-limited; backing off");
+            const b = secondaryBackoff(backoff, {
+              baseMs: iv.prices,
+              secondaryMaxAgeMs: r.pricing.secondaryMaxAgeMs,
+              rand: Math.random(),
+            });
+            backoff = b.nextMs;
+            r.log.warn({ delay_ms: b.delayMs }, "secondary price feed rate-limited; backing off");
+            return b.delayMs;
           }
           return backoff;
         }),

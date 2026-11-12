@@ -9,7 +9,7 @@ import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { Execution } from "@nearpay-internal/spec";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { readKillSwitch } from "../../src/app/kill-switch.js";
+import { readKillSwitch, storeKillSwitch, syncKillSwitch } from "../../src/app/kill-switch.js";
 import { refreshTokens } from "../../src/app/tokens.js";
 import { type EvmRpc, evmRpc } from "../../src/infra/clients/evm.js";
 import { explorer } from "../../src/infra/clients/explorer.js";
@@ -463,6 +463,187 @@ describe("routing health (stable reasons, gauges, ALERT lines)", () => {
       logs.restore();
       s.killSwitch.fail = false;
       await readKillSwitch(s.rails, { force: true });
+    }
+  });
+
+  it("RAILS-2: refreshes keep the last-good price; a stale 1Click price settles a USD stablecoin at par on a fresh CoinGecko price", async () => {
+    const usdcRow = () =>
+      s.admin.db
+        .selectFrom("tokens")
+        .select(["price_num", "price_den", "price_updated_at", "secondary_num", "secondary_updated_at"])
+        .where("livemode", "=", true)
+        .where("asset_id", "=", USDC_BASE)
+        .executeTakeFirstOrThrow();
+    const fresh = new Date();
+    // a refresh resets the registry fields too: Base USDC lives on Anvil here (beforeAll)
+    const { contract_address: anvilToken } = await s.admin.db
+      .selectFrom("tokens")
+      .select("contract_address")
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .executeTakeFirstOrThrow();
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ price_updated_at: fresh })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    // the recorded /v0/tokens list is hours old: a refresh never replaces a newer stored price with it
+    await refreshTokens(s.rails, true);
+    expect((await usdcRow()).price_updated_at?.getTime()).toBe(fresh.getTime());
+    // an older stored price is replaced by the provider's
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ price_updated_at: new Date("2020-01-01T00:00:00Z") })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    await refreshTokens(s.rails, true);
+    const replaced = (await usdcRow()).price_updated_at as Date;
+    expect(replaced.getTime()).toBeGreaterThan(Date.parse("2020-01-02T00:00:00Z"));
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ contract_address: anvilToken })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    try {
+      // 1Click price 10 min old: stale without a secondary …
+      await s.admin.db
+        .updateTable("tokens")
+        .set({ price_updated_at: new Date(Date.now() - 600_000), secondary_num: null, secondary_updated_at: null })
+        .where("livemode", "=", true)
+        .execute();
+      expect(await reasons()).toEqual(["settlement_price_stale"]);
+      // … at par via a fresh CoinGecko price within ±1 % of 1 USD
+      await s.admin.db
+        .updateTable("tokens")
+        .set({
+          secondary_price_usd: "0.9998",
+          secondary_num: "9998",
+          secondary_den: "10000",
+          secondary_updated_at: new Date(),
+          secondary_fetched_at: new Date(),
+          secondary_source: "coingecko",
+        })
+        .where("livemode", "=", true)
+        .where("asset_id", "=", USDC_BASE)
+        .execute();
+      expect(await reasons()).toEqual(["available"]);
+      // a secondary outside the single-source band is a depeg, never par
+      await s.admin.db
+        .updateTable("tokens")
+        .set({ secondary_price_usd: "0.985", secondary_num: "985", secondary_den: "1000" })
+        .where("livemode", "=", true)
+        .where("asset_id", "=", USDC_BASE)
+        .execute();
+      expect(await reasons()).toEqual(["settlement_price_depeg"]);
+    } finally {
+      await s.admin.db
+        .updateTable("tokens")
+        .set({
+          price_updated_at: new Date(),
+          secondary_price_usd: null,
+          secondary_num: null,
+          secondary_den: null,
+          secondary_updated_at: null,
+          secondary_fetched_at: null,
+          secondary_source: null,
+        })
+        .where("livemode", "=", true)
+        .execute();
+    }
+    expect(await reasons()).toEqual(["available"]);
+  });
+
+  it("periodic read (RAILS-1): a missed release or engage self-heals, an older answer never wins, a failed re-read keeps the state", async () => {
+    const copyRow = () =>
+      s.admin.db
+        .selectFrom("control_flags")
+        .select(["value", "known", "source_version"])
+        .where("name", "=", "quoting_enabled")
+        .executeTakeFirstOrThrow();
+    const logs = captureLogs();
+    const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    try {
+      // rails holds engaged v5; sentinel released v6 ten minutes ago and the event never arrived
+      await s.admin.db
+        .updateTable("control_flags")
+        .set({ value: false, known: true, source_version: 5 })
+        .where("name", "=", "quoting_enabled")
+        .execute();
+      Object.assign(s.killSwitch, { engaged: false, version: 6, updatedAt: longAgo });
+      expect(await readKillSwitch(s.rails)).toBe("engaged"); // the quote path does not ask sentinel while known
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(await copyRow()).toMatchObject({ value: true, known: true, source_version: 6 });
+      const healed = logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_copy_diverged"));
+      expect(healed).toMatchObject({ level: "warn", fields: { cause: "copy_behind", resolved: true } });
+      expect(await gauge("nearpay_rails_kill_switch_version")).toBe(6);
+      expect(await gauge("nearpay_rails_kill_switch_source_version")).toBe(6);
+      expect(await gauge("nearpay_rails_kill_switch_engaged")).toBe(0);
+      expect(await gauge("nearpay_rails_kill_switch_diverged")).toBe(0);
+      expect(await gauge("nearpay_rails_kill_switch_last_read_timestamp_seconds")).toBeGreaterThan(
+        Date.now() / 1000 - 60,
+      );
+      expect(await reasons()).toEqual(["available"]);
+
+      // within 60 s a non-forced sync does not ask sentinel again
+      const reads = s.killSwitch.reads;
+      expect(await syncKillSwitch(s.rails)).toBe("released");
+      expect(s.killSwitch.reads).toBe(reads);
+
+      // the reverse: a missed engage (v7) stops live quoting at the next read
+      Object.assign(s.killSwitch, { engaged: true, version: 7 });
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(await reasons()).toEqual(["kill_switch_engaged"]);
+
+      // sentinel answers an older version (restored database): no change, ALERT with the cause, diverged = 1
+      logs.lines.length = 0;
+      Object.assign(s.killSwitch, { engaged: false, version: 4 });
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(await copyRow()).toMatchObject({ value: false, source_version: 7 });
+      expect(logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_copy_diverged"))).toMatchObject({
+        fields: { cause: "sentinel_behind" },
+      });
+      expect(await gauge("nearpay_rails_kill_switch_diverged")).toBe(1);
+      expect(await gauge("nearpay_rails_kill_switch_source_version")).toBe(4);
+
+      // an event older than the copy never applies either
+      expect(await storeKillSwitch(s.rails.db, { engaged: false, version: 6, reason: "late event" })).toBe(false);
+
+      // sentinel unreachable while known: the state stays (never unknown), a warning, no ALERT kill_switch_unknown
+      logs.lines.length = 0;
+      s.killSwitch.fail = true;
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("engaged");
+      expect(logs.lines.some((l) => l.msg.startsWith("kill switch could not be re-read"))).toBe(true);
+      expect(logs.lines.some((l) => l.msg.startsWith("ALERT kill_switch_unknown"))).toBe(false);
+      s.killSwitch.fail = false;
+
+      // operator override (flag-set) at the same version: kept, reported as value_overridden; sentinel's next
+      // release replaces it and the copy agrees again
+      Object.assign(s.killSwitch, { engaged: true, version: 7 });
+      await setFlag("quoting_enabled", true);
+      logs.lines.length = 0;
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(logs.lines.find((l) => l.msg.startsWith("ALERT kill_switch_copy_diverged"))).toMatchObject({
+        fields: { cause: "value_overridden" },
+      });
+      Object.assign(s.killSwitch, { engaged: false, version: 8, updatedAt: null });
+      logs.lines.length = 0;
+      expect(await syncKillSwitch(s.rails, { force: true })).toBe("released");
+      expect(await copyRow()).toMatchObject({ value: true, source_version: 8 });
+      expect(await gauge("nearpay_rails_kill_switch_diverged")).toBe(0);
+      // sentinel changed just now: its event is still in flight, so no ALERT; the divergence cleared
+      expect(logs.lines.some((l) => l.msg.startsWith("ALERT"))).toBe(false);
+      expect(logs.lines.some((l) => l.msg === "kill switch copy agrees with sentinel again")).toBe(true);
+    } finally {
+      logs.restore();
+      Object.assign(s.killSwitch, { engaged: false, version: 0, fail: false, updatedAt: null });
+      await s.admin.db
+        .updateTable("control_flags")
+        .set({ value: true, known: true, source_version: 0 })
+        .where("name", "=", "quoting_enabled")
+        .execute();
     }
   });
 });
@@ -1054,6 +1235,79 @@ describe("NEAR indexer on recorded neardata blocks", () => {
       expect(nd.requests.length).toBe(fetched);
       expect(await readCursor(s.rails, "near-indexer")).toBeNull();
     } finally {
+      await nd.stop();
+    }
+  });
+});
+
+describe("NEAR indexer catch-up (RAILS-3)", () => {
+  it("400 blocks behind: one step fetches them 8 at a time and applies them in height order", async () => {
+    const final = 223_270_700 + 99;
+    const nd = await fakeNeardata(() => final);
+    try {
+      const id = await insertExecution({
+        state: "awaiting_deposit",
+        destinationChain: "near:mainnet",
+        recipient: "51e8f94d77b5e90dc9852ca6113771e11e8382ce69473a75e313e41665de7cbe",
+        recipientType: "intents",
+        asset: USDC_BASE,
+        base: 999_990n,
+        tag: 10n,
+      });
+      const start = 223_270_700 - 301; // 400 blocks behind the final head
+      await writeCursor(s.rails, "near-indexer", { height: start });
+      const client = neardata({ baseUrl: nd.url });
+      expect(await indexOnce(s.rails, client)).toBe(400);
+      const heights = nd.requests
+        .filter((r) => r.path.startsWith("/v0/block/"))
+        .map((r) => Number(r.path.split("/").pop()));
+      expect(new Set(heights).size).toBe(400);
+      expect(Math.min(...heights)).toBe(start + 1);
+      expect(Math.max(...heights)).toBe(final);
+      expect(await readCursor(s.rails, "near-indexer")).toEqual({ height: final });
+      const done = await get(id);
+      expect(done).toMatchObject({ state: "succeeded" });
+      expect(done.evidence).toMatchObject({ source: "indexer", block_ref: "223270700", finality: "final" });
+    } finally {
+      await s.admin.db
+        .updateTable("executions")
+        .set({ state: "failed", terminal_at: new Date() })
+        .where("livemode", "=", true)
+        .where("destination_chain", "=", "near:mainnet")
+        .where("terminal_at", "is", null)
+        .execute();
+      await nd.stop();
+    }
+  });
+
+  it("more than 400 behind: a step stops at the window and the lag gauge reports the rest", async () => {
+    let final = 0;
+    const nd = await fakeNeardata(() => final);
+    try {
+      await insertExecution({
+        state: "awaiting_deposit",
+        destinationChain: "near:mainnet",
+        recipient: "51e8f94d77b5e90dc9852ca6113771e11e8382ce69473a75e313e41665de7cbe",
+        recipientType: "intents",
+        asset: USDC_BASE,
+        base: 123_450n,
+        tag: 11n,
+      });
+      final = 300_001_000;
+      await writeCursor(s.rails, "near-indexer", { height: 300_000_000 });
+      const client = neardata({ baseUrl: nd.url });
+      expect(await indexOnce(s.rails, client)).toBe(400);
+      expect(await readCursor(s.rails, "near-indexer")).toEqual({ height: 300_000_400 });
+      const text = await s.api.metrics.render();
+      expect(text).toContain('nearpay_rails_tracker_lag_blocks{tracker="near-indexer"} 600');
+    } finally {
+      await s.admin.db
+        .updateTable("executions")
+        .set({ state: "failed", terminal_at: new Date() })
+        .where("livemode", "=", true)
+        .where("destination_chain", "=", "near:mainnet")
+        .where("terminal_at", "is", null)
+        .execute();
       await nd.stop();
     }
   });

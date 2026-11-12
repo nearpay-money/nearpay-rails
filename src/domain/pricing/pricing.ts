@@ -5,7 +5,10 @@
  *   (valid ≤ 300 s after `last_updated_at`); a non-par price needs both valid and agreeing within 1.5 % (→ primary).
  * - **Par policy**: a stablecoin of `peg_currency` (USDC/USDT → `usd`; `NP_STABLE_PEGS` for others) settles at par
  *   while its primary price (≤ 5 min old) is within ±2 % of `fx(peg)`, and a valid secondary passes the same band
- *   (depeg guard). Outside it par is disabled for the asset and the non-par rules apply.
+ *   (depeg guard). Par via secondary (audit RAILS-2): when the primary is stale or missing, a **USD** stablecoin still
+ *   settles at par on a valid secondary alone (≤ 300 s) inside the tighter single-source band (±1 %), unless the last
+ *   primary it has is outside the ±2 % band. Never with both sources stale. Outside it par is disabled for the asset
+ *   and the non-par rules apply.
  * - **FX**: a fiat price converts to USD with the stored rate of its currency while `now < valid_until` (ECB
  *   publication-calendar bound); a stale rate is never used (`fx_rate_unavailable`). `usd` needs no rate.
  * - Conversions to the settlement amount round **down** (foundations §6).
@@ -58,6 +61,11 @@ export interface PricingPolicy {
   readonly parMaxAgeMs: number;
   /** Depeg band around `fx(peg)` (2 %). */
   readonly depegBand: Rational;
+  /**
+   * Par via secondary (RAILS-2): band around 1 USD a USD stablecoin's valid secondary price must be within when the
+   * primary is stale or missing (1 %; tighter than `depegBand` because only one source vouches for the peg).
+   */
+  readonly parSecondaryBand: Rational;
   /** The stored rate of a currency (this mode), or undefined. */
   readonly fx: (currency: string) => FxObs | undefined;
 }
@@ -71,6 +79,7 @@ export const DEFAULT_POLICY: PolicyConfig = {
   agreement: rational(15n, 1000n),
   parMaxAgeMs: 300_000,
   depegBand: rational(2n, 100n),
+  parSecondaryBand: rational(1n, 100n),
 };
 
 export type PricingErrorCode =
@@ -124,10 +133,19 @@ export function fxUsable(f: FxObs | undefined, nowMs: number): boolean {
 }
 
 export type ParCheck =
-  | { ok: true; fx: FxObs }
+  | { ok: true; fx: FxObs; via: "primary" | "secondary" }
   | { ok: false; reason: "not_stable" | "stale" | "depeg" | "fx_unavailable" };
 
-/** Depeg guard (§8.2 `parOk`). */
+/**
+ * Depeg guard (§8.2 `parOk`):
+ * 1. fresh primary (≤ `parMaxAgeMs`): it must be within `depegBand` of `fx(peg)`, and so must a valid secondary
+ *    (both sources agree that the asset is at its peg) → par via primary (unchanged rule);
+ * 2. primary stale or missing (RAILS-2), USD pegs only: a valid secondary (≤ `secondaryMaxAgeMs`) within
+ *    `parSecondaryBand` of 1 USD → par via secondary — unless a stale primary is present and outside `depegBand`
+ *    (the last 1Click price said depeg: never overridden by the other source);
+ * 3. anything else: `stale` (no fresh source), or `depeg`.
+ * The FX check is unchanged: a non-USD peg without a usable rate is `fx_unavailable` before any price is looked at.
+ */
 export function parCheck(t: PricedToken, p: PricingPolicy): ParCheck {
   if (!t.peg_currency) return { ok: false, reason: "not_stable" };
   let fx: FxObs;
@@ -136,11 +154,20 @@ export function parCheck(t: PricedToken, p: PricingPolicy): ParCheck {
   } catch {
     return { ok: false, reason: "fx_unavailable" };
   }
-  if (!fresh(t.primary, p.parMaxAgeMs, p.nowMs)) return { ok: false, reason: "stale" };
-  const inBand = (o: PriceObs) => cmp(relDiff(div(o.value, fx.value), ONE), p.depegBand) <= 0;
-  if (!inBand(t.primary)) return { ok: false, reason: "depeg" };
-  if (fresh(t.secondary, p.secondaryMaxAgeMs, p.nowMs) && !inBand(t.secondary)) return { ok: false, reason: "depeg" };
-  return { ok: true, fx };
+  const within = (o: PriceObs, band: Rational) => cmp(relDiff(div(o.value, fx.value), ONE), band) <= 0;
+  const secondaryValid = fresh(t.secondary, p.secondaryMaxAgeMs, p.nowMs);
+  const lastPrimary: PriceObs | null = t.primary;
+  if (fresh(t.primary, p.parMaxAgeMs, p.nowMs)) {
+    if (!within(t.primary, p.depegBand)) return { ok: false, reason: "depeg" };
+    if (secondaryValid && !within(t.secondary as PriceObs, p.depegBand)) return { ok: false, reason: "depeg" };
+    return { ok: true, fx, via: "primary" };
+  }
+  // primary stale or missing: a USD stablecoin may settle at par on the secondary alone, inside the tighter band
+  if (t.peg_currency !== "usd" || !secondaryValid) return { ok: false, reason: "stale" };
+  if (lastPrimary && lastPrimary.value.num > 0n && !within(lastPrimary, p.depegBand))
+    return { ok: false, reason: "depeg" };
+  if (!within(t.secondary as PriceObs, p.parSecondaryBand)) return { ok: false, reason: "depeg" };
+  return { ok: true, fx, via: "secondary" };
 }
 
 export type DualPrice =
@@ -207,6 +234,13 @@ export function pricesOf(t: PricedToken, p: Pick<PricingPolicy, "primaryMaxAgeMs
   return out;
 }
 
+/** The secondary price that vouched for par when the primary was stale (RAILS-2), for the snapshot's `rates`. */
+function parEvidence(t: PricedToken, par: ParCheck, p: PricingPolicy): PriceRate[] {
+  return par.ok && par.via === "secondary" && t.secondary
+    ? [priceRateOf(t, t.secondary, "secondary", p.secondaryMaxAgeMs)]
+    : [];
+}
+
 /** USD value of one whole token for settlement: `fx(peg)` at par, else the dual-source price. */
 export function unitValue(t: PricedToken, p: PricingPolicy): UnitValue {
   const par = parCheck(t, p);
@@ -215,7 +249,7 @@ export function unitValue(t: PricedToken, p: PricingPolicy): UnitValue {
       usd: par.fx.value,
       par: true,
       parCurrency: t.peg_currency,
-      rates: t.peg_currency === "usd" ? [] : [fxRateView(par.fx)],
+      rates: [...(t.peg_currency === "usd" ? [] : [fxRateView(par.fx)]), ...parEvidence(t, par, p)],
     };
   const d = dualPrice(t, p);
   if (d.ok)
@@ -357,7 +391,7 @@ export function settle(
         amount,
         par: true,
         usd: mul(div(rational(pricing.amount), pow10(minorUnits(pricing.currency))), par.fx.value),
-        snapshot: snapshot(true, pricing.currency, fx, fx ? [fxRateView(fx)] : []),
+        snapshot: snapshot(true, pricing.currency, fx, [...(fx ? [fxRateView(fx)] : []), ...parEvidence(d, par, p)]),
       });
     }
   }
@@ -371,7 +405,7 @@ export function settle(
         amount: convertUnits(1n, 0, v.usd, d.decimals, "floor"),
         par: v.par,
         usd: v.usd,
-        snapshot: snapshot(v.par, v.par ? "usd" : null, v.fx, v.rates),
+        snapshot: snapshot(v.par, v.par ? "usd" : null, v.fx, [...v.rates, ...parEvidence(d, par, p)]),
       });
   }
   // non-par: needs both price sources
@@ -412,4 +446,20 @@ export function unitsForUsdMicros(micros: bigint, t: PricedToken, p: PricingPoli
 /** Indicative USD price (primary only; options and minimums, never settlement). */
 export function indicativeUsd(t: PricedToken): Rational | null {
   return t.primary && t.primary.value.num > 0n ? t.primary.value : null;
+}
+
+/**
+ * Next delay of the secondary-price loop after a 429 (RAILS-2): doubles from `baseMs` but never beyond half the
+ * secondary freshness window (`secondaryMaxAgeMs / 2`, 150 s by default), so one successful call after a back-off
+ * still lands before the stored secondary goes stale. ±20 % jitter (`rand` in [0, 1)), still capped.
+ * Returns `{ nextMs, delayMs }`: `nextMs` is the un-jittered value to double next time.
+ */
+export function secondaryBackoff(
+  prevMs: number,
+  o: { baseMs: number; secondaryMaxAgeMs: number; rand: number },
+): { nextMs: number; delayMs: number } {
+  const cap = Math.max(o.baseMs, Math.floor(o.secondaryMaxAgeMs / 2));
+  const nextMs = Math.min(Math.max(prevMs, o.baseMs) * 2, cap);
+  const jittered = Math.round(nextMs * (0.8 + 0.4 * Math.min(Math.max(o.rand, 0), 1)));
+  return { nextMs, delayMs: Math.min(jittered, cap) };
 }

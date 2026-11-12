@@ -5,14 +5,20 @@
  *   and NEP-141 `ft_transfer`s of the in-flight destination tokens. Demand-driven like the watchers:
  *   with no live execution in flight to NEAR it makes no call at all and forgets its cursor; when
  *   demand returns it starts at the final head. At-least-once (cursor after the block), matching is idempotent. > 50 blocks behind the
- *   head raises an alert. Stage 1 reads one source (neardata); the verifier's RPC lookup is the
- *   backstop while it stalls.
+ *   head raises an alert (log, at most every 5 min while behind; gauge `nearpay_rails_tracker_lag_blocks{tracker=
+ *   "near-indexer"}` for deploy's `TrackerLagging`). Stage 1 reads one source (neardata); the verifier's RPC lookup
+ *   is the backstop while it stalls.
+ * - Catch-up (audit RAILS-3): more than {@link BATCH} blocks behind (after downtime or a sleeping host), a step
+ *   fetches up to {@link CATCHUP_WINDOW} blocks with {@link CATCHUP_CONCURRENCY} requests in flight and still applies
+ *   them strictly in height order, writing the cursor after each block (monotonic; a failure stops at the last
+ *   applied block).
  * - Test: the sandbox's simulated Verifier events (`/sim/intents/events`) through the same parser
  *   and matching code.
  */
 
 import type { VaultEventRecord } from "@nearpay-internal/spec";
 import type { Rails } from "../../app/context.js";
+import { alertLimiter } from "../../infra/clients/error-class.js";
 import type { Neardata } from "../../infra/clients/near.js";
 import { clearCursor, readCursor, writeCursor } from "../cursors.js";
 import { matchCredits } from "../matching.js";
@@ -20,7 +26,37 @@ import { type Credit, creditsOf, outcomesOfBlock } from "./parse.js";
 import { forwardVaultEvents, type VaultRejectReason, vaultEventsOf } from "./vault.js";
 
 const NEAR = "near:mainnet";
-const BATCH = 50;
+/** Blocks per step while (nearly) at the head, fetched one after another. */
+export const BATCH = 50;
+/** Blocks per step while catching up (lag > BATCH). */
+export const CATCHUP_WINDOW = 400;
+/** Block fetches in flight while catching up. */
+export const CATCHUP_CONCURRENCY = 8;
+/** While behind, the lag alert line repeats at most this often. */
+export const LAG_ALERT_EVERY_MS = 5 * 60_000;
+const lagAlerts = new WeakMap<object, ReturnType<typeof alertLimiter>>();
+
+/**
+ * Fetches `heights` with at most `concurrency` requests in flight and yields the results strictly in the given
+ * order. Stopping early leaves no unhandled rejection behind.
+ */
+export async function* fetchInOrder<T>(
+  heights: readonly number[],
+  fetch: (h: number) => Promise<T>,
+  concurrency: number,
+): AsyncGenerator<[number, T]> {
+  const pending: Promise<T>[] = [];
+  let next = 0;
+  for (let i = 0; i < heights.length; i++) {
+    while (next < heights.length && pending.length < Math.max(1, concurrency)) {
+      const p = fetch(heights[next] as number);
+      p.catch(() => {});
+      pending.push(p);
+      next++;
+    }
+    yield [heights[i] as number, await (pending.shift() as Promise<T>)];
+  }
+}
 
 async function tokenContracts(r: Rails, livemode: boolean): Promise<Set<string>> {
   const rows = await r.db
@@ -76,11 +112,18 @@ export async function indexOnce(r: Rails, nd: Neardata, signal?: AbortSignal): P
     return 0;
   }
   const contracts = await tokenContracts(r, true);
-  const to = Math.min(cursor + BATCH, final);
+  const behind = final - cursor;
+  r.metrics.lag(name, behind);
+  const catchingUp = behind > BATCH;
+  const to = Math.min(cursor + (catchingUp ? CATCHUP_WINDOW : BATCH), final);
+  const heights = Array.from({ length: to - cursor }, (_, i) => cursor + 1 + i);
   let processed = 0;
-  for (let h = cursor + 1; h <= to; h++) {
+  for await (const [h, block] of fetchInOrder(
+    heights,
+    (x) => nd.block(x, signal),
+    catchingUp ? CATCHUP_CONCURRENCY : 1,
+  )) {
     if (signal?.aborted) break;
-    const block = await nd.block(h, signal);
     if (block) {
       const ctx = { chain: NEAR, intentsContract: r.intentsContract, tokenContracts: contracts, blockRef: String(h) };
       const outcomes = outcomesOfBlock(block);
@@ -109,7 +152,21 @@ export async function indexOnce(r: Rails, nd: Neardata, signal?: AbortSignal): P
   }
   const lag = final - (cursor + processed);
   r.metrics.lag(name, lag);
-  if (lag > 50) r.log.error({ lag, cursor: cursor + processed, final }, "ALERT NEAR indexer is behind the final head");
+  let alert = lagAlerts.get(r);
+  if (!alert) {
+    alert = alertLimiter(LAG_ALERT_EVERY_MS, r.now);
+    lagAlerts.set(r, alert);
+  }
+  if (lag > BATCH) {
+    if (alert.due())
+      r.log.error(
+        { lag, cursor: cursor + processed, final, catching_up: catchingUp, steps: alert.count },
+        "ALERT NEAR indexer is behind the final head",
+      );
+  } else if (alert.active) {
+    r.log.info({ lag, steps: alert.count }, "NEAR indexer caught up with the final head");
+    alert.reset();
+  }
   return processed;
 }
 

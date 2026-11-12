@@ -66,7 +66,8 @@ export const REASON_TEXT: Readonly<Record<RoutingReason, string>> = {
 
 /** The first thing an operator should do about each reason (ops CLI, beta smoke, alert text). */
 export const REASON_FIX: Readonly<Record<RoutingReason, string>> = {
-  kill_switch_engaged: "release the kill switch in the console (ops > Kill switch) once the cause is understood",
+  kill_switch_engaged:
+    "release the kill switch in the console (ops > Kill switch) once the cause is understood; already released? rails re-reads sentinel every 60 s — check `ops rails flags` (source_version) and rails logs for 'ALERT kill_switch_copy_diverged'",
   kill_switch_unknown:
     "check rails-api logs for 'ALERT kill_switch_unknown' (sentinel unreachable, auth, NP_SENTINEL_URL unset); it clears as soon as sentinel answers",
   treasury_unset: "set NP_TREASURY_ACCOUNT for rails (live overlay) and restart rails-api",

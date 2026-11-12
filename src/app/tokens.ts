@@ -67,7 +67,29 @@ export async function registryRefreshedAt(r: Rails, livemode: boolean): Promise<
 /** Drift alerts already logged by this process (once per mode, asset id and kind). */
 const driftReported = new Set<string>();
 
-/** Replaces the registry of one mode with the provider's list; tokens that disappeared are disabled. */
+/** The refresh carries a usable price at least as new as the stored one. */
+const PRICE_NEWER = sql<boolean>`excluded.price_num is not null and excluded.price_den is not null
+  and excluded.price_updated_at is not null
+  and (tokens.price_num is null or tokens.price_updated_at is null or excluded.price_updated_at >= tokens.price_updated_at)`;
+type PriceColumn =
+  | "price_usd"
+  | "price_updated_at"
+  | "price_num"
+  | "price_den"
+  | "secondary_price_usd"
+  | "secondary_updated_at"
+  | "secondary_num"
+  | "secondary_den"
+  | "secondary_source"
+  | "secondary_fetched_at";
+// a CASE over the column's own value: typed `never` so it fits any of the price columns in the upsert set
+const lastGood = (c: PriceColumn) =>
+  sql<never>`case when ${PRICE_NEWER} then ${sql.ref(`excluded.${c}`)} else ${sql.ref(`tokens.${c}`)} end`;
+
+/**
+ * Replaces the registry of one mode with the provider's list; tokens that disappeared are disabled. Prices are
+ * last-good: an entry without a usable price, or with an older one, keeps the stored price (RAILS-2).
+ */
 export async function refreshTokens(r: Rails, livemode: boolean): Promise<number> {
   const provider = livemode ? r.providers.live : r.providers.test;
   if (!provider) return 0;
@@ -141,23 +163,25 @@ export async function refreshTokens(r: Rails, livemode: boolean): Promise<number
             family: eb.ref("excluded.family"),
             is_usd_stable: eb.ref("excluded.is_usd_stable"),
             enabled: eb.ref("excluded.enabled"),
-            price_usd: eb.ref("excluded.price_usd"),
-            price_updated_at: eb.ref("excluded.price_updated_at"),
+            // last-good price (RAILS-2): a refresh without a price, or with an older one, keeps the stored price;
+            // its use stays bounded by the explicit max ages of §8.2 (120 s / 300 s par)
+            price_usd: lastGood("price_usd"),
+            price_updated_at: lastGood("price_updated_at"),
             memo_required: eb.ref("excluded.memo_required"),
             refreshed_at: eb.ref("excluded.refreshed_at"),
             peg_currency: eb.ref("excluded.peg_currency"),
             coingecko_id: eb.ref("excluded.coingecko_id"),
-            price_num: eb.ref("excluded.price_num"),
-            price_den: eb.ref("excluded.price_den"),
+            price_num: lastGood("price_num"),
+            price_den: lastGood("price_den"),
             ...(livemode
               ? {}
               : {
-                  secondary_price_usd: eb.ref("excluded.secondary_price_usd"),
-                  secondary_updated_at: eb.ref("excluded.secondary_updated_at"),
-                  secondary_num: eb.ref("excluded.secondary_num"),
-                  secondary_den: eb.ref("excluded.secondary_den"),
-                  secondary_source: eb.ref("excluded.secondary_source"),
-                  secondary_fetched_at: eb.ref("excluded.secondary_fetched_at"),
+                  secondary_price_usd: lastGood("secondary_price_usd"),
+                  secondary_updated_at: lastGood("secondary_updated_at"),
+                  secondary_num: lastGood("secondary_num"),
+                  secondary_den: lastGood("secondary_den"),
+                  secondary_source: lastGood("secondary_source"),
+                  secondary_fetched_at: lastGood("secondary_fetched_at"),
                 }),
           })),
         )

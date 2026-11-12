@@ -12,6 +12,7 @@ import {
   type PricingPolicy,
   parCheck,
   pricesOf,
+  secondaryBackoff,
   settle,
   settlementPrice,
   unitsForUsdMicros,
@@ -116,6 +117,67 @@ describe("par policy (depeg guard)", () => {
   it("a valid secondary must pass the same band; a stale one is ignored", () => {
     expect(parCheck(usdc({ secondary: obs("0.97", 10, "coingecko") }), p)).toEqual({ ok: false, reason: "depeg" });
     expect(parCheck(usdc({ secondary: obs("0.97", 301, "coingecko") }), p).ok).toBe(true);
+  });
+
+  it("par via secondary (RAILS-2): a stale or missing primary, a valid secondary within ±1 % of 1 USD", () => {
+    const cg = (v: string, ageS = 30) => obs(v, ageS, "coingecko");
+    const none = () => undefined;
+    // 1Click price 10 min old (or absent), CoinGecko fresh at 0.9993: par via secondary
+    expect(parCheck(usdc({ primary: obs("0.9995", 600), secondary: cg("0.9993") }), p)).toMatchObject({
+      ok: true,
+      via: "secondary",
+    });
+    expect(parCheck(usdc({ primary: null, secondary: cg("1.0099") }), p)).toMatchObject({ ok: true, via: "secondary" });
+    // the single-source band is tighter than the ±2 % band: 0.985 passes with a fresh primary, not alone
+    expect(parCheck(usdc({ primary: obs("0.985"), secondary: cg("0.985") }), p)).toMatchObject({ via: "primary" });
+    expect(parCheck(usdc({ primary: null, secondary: cg("0.989") }), p)).toEqual({ ok: false, reason: "depeg" });
+    expect(parCheck(usdc({ primary: obs("1", 600), secondary: cg("1.011") }), p)).toEqual({
+      ok: false,
+      reason: "depeg",
+    });
+    // a stale primary that said depeg is never overridden by the secondary
+    expect(parCheck(usdc({ primary: obs("0.95", 600), secondary: cg("1") }), p)).toEqual({
+      ok: false,
+      reason: "depeg",
+    });
+    // both stale (or the secondary missing) never pass
+    expect(parCheck(usdc({ primary: obs("1", 600), secondary: cg("1", 301) }), p)).toEqual({
+      ok: false,
+      reason: "stale",
+    });
+    expect(parCheck(usdc({ primary: obs("1", 600), secondary: null }), p)).toEqual({ ok: false, reason: "stale" });
+    // USD pegs only: EURC with a stale primary stays stale (no single-source par through FX)
+    expect(parCheck(eurc({ primary: obs("1.081", 600) }), p)).toEqual({ ok: false, reason: "stale" });
+    // the secondary that vouched for par is in the snapshot
+    const s = settle({ currency: "usd", amount: 1000n }, usdc({ primary: obs("1", 600), secondary: cg("1") }), p, none);
+    expect(s).toMatchObject({ amount: 10_000_000n, par: true });
+    expect(s.snapshot.rates.map((r) => `${r.base}:${r.role}`)).toEqual(["nep141:usdc:secondary"]);
+    const u = unitValue(usdc({ primary: null, secondary: cg("1") }), p);
+    expect(u).toMatchObject({ par: true, parCurrency: "usd" });
+    expect(u.rates.map((r) => r.role)).toEqual(["secondary"]);
+    // EUR pricing settled in a USD stablecoin at par via secondary carries the FX rate and the secondary
+    const e = settle({ currency: "eur", amount: 1000n }, usdc({ primary: null, secondary: cg("1") }), p, none);
+    expect(e.snapshot.rates.map((r) => `${r.kind}:${r.base}`)).toEqual(["fx:eur", "price:nep141:usdc"]);
+  });
+
+  it("the secondary-price back-off never exceeds half the secondary freshness window", () => {
+    const o = { baseMs: 60_000, secondaryMaxAgeMs: 300_000 };
+    let prev = 60_000;
+    const seen: number[] = [];
+    for (const rand of [0, 0.5, 0.999, 0.999, 0.999]) {
+      const b = secondaryBackoff(prev, { ...o, rand });
+      expect(b.delayMs).toBeLessThanOrEqual(150_000);
+      seen.push(b.nextMs);
+      prev = b.nextMs;
+    }
+    expect(seen).toEqual([120_000, 150_000, 150_000, 150_000, 150_000]);
+    expect(secondaryBackoff(60_000, { ...o, rand: 0 }).delayMs).toBe(96_000);
+    // a window shorter than twice the base keeps the base cadence
+    expect(secondaryBackoff(60_000, { baseMs: 60_000, secondaryMaxAgeMs: 90_000, rand: 0.5 })).toEqual({
+      nextMs: 60_000,
+      delayMs: 60_000,
+    });
+    expect(secondaryBackoff(0, { ...o, rand: -1 }).delayMs).toBe(96_000);
   });
 
   it("non-USD pegs compare with fx(peg); no usable rate disables par", () => {
