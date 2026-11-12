@@ -1240,6 +1240,79 @@ describe("NEAR indexer on recorded neardata blocks", () => {
   });
 });
 
+describe("NEAR indexer catch-up (RAILS-3)", () => {
+  it("400 blocks behind: one step fetches them 8 at a time and applies them in height order", async () => {
+    const final = 223_270_700 + 99;
+    const nd = await fakeNeardata(() => final);
+    try {
+      const id = await insertExecution({
+        state: "awaiting_deposit",
+        destinationChain: "near:mainnet",
+        recipient: "51e8f94d77b5e90dc9852ca6113771e11e8382ce69473a75e313e41665de7cbe",
+        recipientType: "intents",
+        asset: USDC_BASE,
+        base: 999_990n,
+        tag: 10n,
+      });
+      const start = 223_270_700 - 301; // 400 blocks behind the final head
+      await writeCursor(s.rails, "near-indexer", { height: start });
+      const client = neardata({ baseUrl: nd.url });
+      expect(await indexOnce(s.rails, client)).toBe(400);
+      const heights = nd.requests
+        .filter((r) => r.path.startsWith("/v0/block/"))
+        .map((r) => Number(r.path.split("/").pop()));
+      expect(new Set(heights).size).toBe(400);
+      expect(Math.min(...heights)).toBe(start + 1);
+      expect(Math.max(...heights)).toBe(final);
+      expect(await readCursor(s.rails, "near-indexer")).toEqual({ height: final });
+      const done = await get(id);
+      expect(done).toMatchObject({ state: "succeeded" });
+      expect(done.evidence).toMatchObject({ source: "indexer", block_ref: "223270700", finality: "final" });
+    } finally {
+      await s.admin.db
+        .updateTable("executions")
+        .set({ state: "failed", terminal_at: new Date() })
+        .where("livemode", "=", true)
+        .where("destination_chain", "=", "near:mainnet")
+        .where("terminal_at", "is", null)
+        .execute();
+      await nd.stop();
+    }
+  });
+
+  it("more than 400 behind: a step stops at the window and the lag gauge reports the rest", async () => {
+    let final = 0;
+    const nd = await fakeNeardata(() => final);
+    try {
+      await insertExecution({
+        state: "awaiting_deposit",
+        destinationChain: "near:mainnet",
+        recipient: "51e8f94d77b5e90dc9852ca6113771e11e8382ce69473a75e313e41665de7cbe",
+        recipientType: "intents",
+        asset: USDC_BASE,
+        base: 123_450n,
+        tag: 11n,
+      });
+      final = 300_001_000;
+      await writeCursor(s.rails, "near-indexer", { height: 300_000_000 });
+      const client = neardata({ baseUrl: nd.url });
+      expect(await indexOnce(s.rails, client)).toBe(400);
+      expect(await readCursor(s.rails, "near-indexer")).toEqual({ height: 300_000_400 });
+      const text = await s.api.metrics.render();
+      expect(text).toContain('nearpay_rails_tracker_lag_blocks{tracker="near-indexer"} 600');
+    } finally {
+      await s.admin.db
+        .updateTable("executions")
+        .set({ state: "failed", terminal_at: new Date() })
+        .where("livemode", "=", true)
+        .where("destination_chain", "=", "near:mainnet")
+        .where("terminal_at", "is", null)
+        .execute();
+      await nd.stop();
+    }
+  });
+});
+
 describe("Explorer feed", () => {
   it("nudges an execution whose Explorer status differs; backs off on 429", async () => {
     const x = await create(live());
