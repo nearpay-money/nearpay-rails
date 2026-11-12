@@ -6,8 +6,8 @@
  * same asset across chains (USDC on Base and USDC on NEAR are `same_asset`), and `is_usd_stable`
  * marks the USD stablecoins that may settle at par (§8.2).
  */
-import { AssetId, parseOmftAssetId } from "@nearpay-money/spec";
-import { splAssetId } from "../chains/solana.js";
+import { AssetId, parseAssetId } from "@nearpay-money/spec";
+import { splMintMatchesAssetId } from "../chains/solana.js";
 import { parseExactDecimal, ratioToWire } from "../pricing/ratio.js";
 import type { ChainProfiles } from "./chain-profiles.js";
 
@@ -75,11 +75,20 @@ export function registryRows(
     coingeckoIds?: Readonly<Record<string, string>>;
     /** Stage 4 (§21.1): an entry dropped because its contract does not reproduce its asset id (alert). */
     onDrop?: (assetId: string, reason: string) => void;
+    /**
+     * Drift check (2026-11-12): an entry whose id no NearPay parser recognises, or whose id names another chain than
+     * the provider's `blockchain` (alert; the entry is kept when the AssetId contract admits it — rails takes the chain
+     * from `blockchain`; `1cs_v1:` ids are outside the contract and never enter the registry).
+     */
+    onDrift?: (assetId: string, drift: AssetIdDrift) => void;
   } = {},
 ): TokenRow[] {
   const seen = new Set<string>();
   const rows: TokenRow[] = [];
   for (const t of tokens) {
+    // the drift check sees every listed id, including shapes the AssetId contract does not admit (e.g. 1cs_v1:)
+    const drift = typeof t.assetId === "string" && !seen.has(t.assetId) ? assetIdDrift(t) : null;
+    if (drift) o.onDrift?.(t.assetId, drift);
     if (!AssetId.safeParse(t.assetId).success || seen.has(t.assetId)) continue;
     if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 255) continue;
     const bound = contractBinding(t);
@@ -122,18 +131,39 @@ export function registryRows(
 }
 
 /**
- * Stage 4 (§21.1): an SPL omft entry (`nep141:sol-<hash20>.omft.near`) is bound to its mint like an EVM contract —
- * `splAssetId(contractAddress)` must reproduce the id, else the entry is dropped (null = consistent / not an SPL id).
+ * Stage 4 (§21.1): an SPL bridge entry (`nep141:sol-<hash20>.omft.near`, or since 2026-11 `sol-0x<hash20>.omdep.near`)
+ * is bound to its mint like an EVM contract — the mint must hash to the id's hash20; a `1cs_v1:sol:spl:<mint>` entry
+ * must list that mint. Otherwise the entry is dropped (null = consistent / not an SPL id).
  */
 export function contractBinding(t: Pick<ProviderToken, "assetId" | "blockchain" | "contractAddress">): string | null {
-  const omft = parseOmftAssetId(t.assetId);
-  if (omft?.blockchain !== "sol" || omft.kind !== "hash20") return null;
+  const a = parseAssetId(t.assetId);
+  const bridged = (a.scheme === "omft" || a.scheme === "omdep") && a.blockchain === "sol" && a.kind === "hash20";
+  const v1 = a.scheme === "1cs_v1" && a.blockchain === "sol" && a.standard === "spl";
+  if (!bridged && !v1) return null;
   if (!t.contractAddress) return "SPL asset without a mint";
-  try {
-    return splAssetId(t.contractAddress) === t.assetId ? null : "SPL mint does not reproduce the asset id";
-  } catch {
-    return "SPL mint is not a Solana address";
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t.contractAddress)) return "SPL mint is not a Solana address";
+  return splMintMatchesAssetId(t.contractAddress, t.assetId) ? null : "SPL mint does not reproduce the asset id";
+}
+
+export type AssetIdDrift =
+  | { readonly kind: "unknown_shape"; readonly reason: string }
+  | { readonly kind: "chain_disagrees"; readonly id_blockchain: string; readonly blockchain: string };
+
+/**
+ * Drift check (2026-11-12, after the `omdep` suffix appeared unannounced): null when spec `parseAssetId` recognises the
+ * id and it names the provider's own `blockchain`. `nep245:` multi-token ids and NEP-141 accounts the provider lists on
+ * NEAR count as recognised (their chain comes from `blockchain`).
+ */
+export function assetIdDrift(t: Pick<ProviderToken, "assetId" | "blockchain">): AssetIdDrift | null {
+  const a = parseAssetId(t.assetId);
+  if (a.scheme === "unknown") {
+    if (t.assetId.startsWith("nep245:")) return null;
+    if (t.assetId.startsWith("nep141:") && t.blockchain === "near") return null;
+    return { kind: "unknown_shape", reason: a.reason };
   }
+  return a.blockchain === t.blockchain
+    ? null
+    : { kind: "chain_disagrees", id_blockchain: a.blockchain, blockchain: t.blockchain };
 }
 
 export type RouteClass = "same_asset" | "stable_pair" | "volatile" | "intents_transfer";

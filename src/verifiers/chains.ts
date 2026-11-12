@@ -30,7 +30,7 @@ import {
   outputsTo,
   snapshotUsdMicros,
 } from "../domain/chains/bitcoin.js";
-import { checkSolanaTransfer, splAssetId, TOKEN_PROGRAM } from "../domain/chains/solana.js";
+import { checkSolanaTransfer, splMintMatchesAssetId, TOKEN_PROGRAM } from "../domain/chains/solana.js";
 import { ONE_CONFIRMATION } from "../domain/token-registry/chain-profiles.js";
 import { compareTransfers, type ObservedTransfer } from "../domain/verification/verification.js";
 import type { Esplora } from "../infra/clients/esplora.js";
@@ -50,17 +50,14 @@ const pending = (details: Record<string, unknown>, result: "pending" | "not_foun
 
 const recipientOf = (row: ExecutionRow) => row.destination_key.split("|")[1] as string;
 
-/** SPL mint of the settlement asset (null for SOL), checked against the omft asset id (§21.1). */
+/** SPL mint of the settlement asset (null for SOL), checked against the asset id — omft, omdep or 1cs_v1 (§21.1). */
 async function solanaMint(r: Rails, row: ExecutionRow): Promise<{ mint: string | null } | { error: string }> {
   const t = await tokenOf(r, row.livemode, row.destination_asset_id);
   if (!t) return { error: "settlement asset unknown" };
   const mint = t.contract_address;
   if (!mint) return { mint: null };
-  try {
-    if (splAssetId(mint) !== row.destination_asset_id) return { error: "SPL mint does not reproduce the asset id" };
-  } catch {
-    return { error: "SPL mint is not a Solana address" };
-  }
+  if (!splMintMatchesAssetId(mint, row.destination_asset_id))
+    return { error: "SPL mint does not reproduce the asset id" };
   return { mint };
 }
 

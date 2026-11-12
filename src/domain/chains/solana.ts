@@ -12,7 +12,7 @@
  * - A transaction with `meta.err` set proves nothing.
  */
 
-import type { SolanaEvidence } from "@nearpay-money/spec";
+import { parseAssetId, type SolanaEvidence } from "@nearpay-money/spec";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { keccak_256 } from "@noble/hashes/sha3.js";
@@ -82,9 +82,30 @@ export function associatedTokenAddress(
 
 /** omft asset id of an SPL mint: `nep141:sol-` + hex(keccak256(mint bytes)[12..32]) + `.omft.near` (§21.1). */
 export function splAssetId(mint: string): string {
+  return `nep141:sol-${splAssetHash(mint)}.omft.near`;
+}
+
+/** hex(keccak256(mint bytes)[12..32]): the hash20 an SPL bridge asset id names (omft `sol-<hex>`, omdep `sol-0x<hex>`). */
+export function splAssetHash(mint: string): string {
   const m = decodeSolanaAddress(mint);
   if (!m) throw new RangeError(`not a Solana address: ${mint}`);
-  return `nep141:sol-${Buffer.from(keccak_256(m).subarray(12)).toString("hex")}.omft.near`;
+  return Buffer.from(keccak_256(m).subarray(12)).toString("hex");
+}
+
+/**
+ * Whether `mint` is the SPL mint `assetId` names (spec `parseAssetId`, 0.5.2): a Solana bridge id (`omft` or `omdep`)
+ * whose hash20 the mint reproduces, or `1cs_v1:sol:spl:<mint>` with that exact mint. False for anything else.
+ */
+export function splMintMatchesAssetId(mint: string, assetId: string): boolean {
+  const a = parseAssetId(assetId);
+  if ((a.scheme === "omft" || a.scheme === "omdep") && a.blockchain === "sol" && a.kind === "hash20") {
+    try {
+      return splAssetHash(mint) === a.token;
+    } catch {
+      return false;
+    }
+  }
+  return a.scheme === "1cs_v1" && a.blockchain === "sol" && a.standard === "spl" && a.address === mint;
 }
 
 // ---------------------------------------------------------------------------------------------
