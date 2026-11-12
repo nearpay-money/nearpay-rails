@@ -64,6 +64,9 @@ export async function registryRefreshedAt(r: Rails, livemode: boolean): Promise<
   return row?.at ? new Date(row.at as unknown as string | Date) : null;
 }
 
+/** Drift alerts already logged by this process (once per mode, asset id and kind). */
+const driftReported = new Set<string>();
+
 /** Replaces the registry of one mode with the provider's list; tokens that disappeared are disabled. */
 export async function refreshTokens(r: Rails, livemode: boolean): Promise<number> {
   const provider = livemode ? r.providers.live : r.providers.test;
@@ -77,6 +80,18 @@ export async function refreshTokens(r: Rails, livemode: boolean): Promise<number
         { asset_id, reason, livemode },
         "ALERT token registry entry dropped (asset id not bound to its contract)",
       ),
+    onDrift: (asset_id, drift) => {
+      const key = `${livemode}|${asset_id}|${drift.kind}`;
+      if (driftReported.has(key)) return;
+      driftReported.add(key);
+      if (driftReported.size > 10_000) driftReported.clear();
+      r.log.error(
+        { asset_id, livemode, ...drift },
+        drift.kind === "unknown_shape"
+          ? "ALERT unknown_asset_id_shape: the provider lists an asset id no NearPay parser recognises (update spec parseAssetId before payers use it)"
+          : "ALERT asset_id_chain_disagrees: the asset id names another chain than the provider's blockchain",
+      );
+    },
   });
   if (rows.length === 0) throw new Error(`${provider.name} returned no usable tokens`);
   const now = new Date(r.now());
