@@ -466,6 +466,96 @@ describe("routing health (stable reasons, gauges, ALERT lines)", () => {
     }
   });
 
+  it("RAILS-2: refreshes keep the last-good price; a stale 1Click price settles a USD stablecoin at par on a fresh CoinGecko price", async () => {
+    const usdcRow = () =>
+      s.admin.db
+        .selectFrom("tokens")
+        .select(["price_num", "price_den", "price_updated_at", "secondary_num", "secondary_updated_at"])
+        .where("livemode", "=", true)
+        .where("asset_id", "=", USDC_BASE)
+        .executeTakeFirstOrThrow();
+    const fresh = new Date();
+    // a refresh resets the registry fields too: Base USDC lives on Anvil here (beforeAll)
+    const { contract_address: anvilToken } = await s.admin.db
+      .selectFrom("tokens")
+      .select("contract_address")
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .executeTakeFirstOrThrow();
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ price_updated_at: fresh })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    // the recorded /v0/tokens list is hours old: a refresh never replaces a newer stored price with it
+    await refreshTokens(s.rails, true);
+    expect((await usdcRow()).price_updated_at?.getTime()).toBe(fresh.getTime());
+    // an older stored price is replaced by the provider's
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ price_updated_at: new Date("2020-01-01T00:00:00Z") })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    await refreshTokens(s.rails, true);
+    const replaced = (await usdcRow()).price_updated_at as Date;
+    expect(replaced.getTime()).toBeGreaterThan(Date.parse("2020-01-02T00:00:00Z"));
+    await s.admin.db
+      .updateTable("tokens")
+      .set({ contract_address: anvilToken })
+      .where("livemode", "=", true)
+      .where("asset_id", "=", USDC_BASE)
+      .execute();
+    try {
+      // 1Click price 10 min old: stale without a secondary …
+      await s.admin.db
+        .updateTable("tokens")
+        .set({ price_updated_at: new Date(Date.now() - 600_000), secondary_num: null, secondary_updated_at: null })
+        .where("livemode", "=", true)
+        .execute();
+      expect(await reasons()).toEqual(["settlement_price_stale"]);
+      // … at par via a fresh CoinGecko price within ±1 % of 1 USD
+      await s.admin.db
+        .updateTable("tokens")
+        .set({
+          secondary_price_usd: "0.9998",
+          secondary_num: "9998",
+          secondary_den: "10000",
+          secondary_updated_at: new Date(),
+          secondary_fetched_at: new Date(),
+          secondary_source: "coingecko",
+        })
+        .where("livemode", "=", true)
+        .where("asset_id", "=", USDC_BASE)
+        .execute();
+      expect(await reasons()).toEqual(["available"]);
+      // a secondary outside the single-source band is a depeg, never par
+      await s.admin.db
+        .updateTable("tokens")
+        .set({ secondary_price_usd: "0.985", secondary_num: "985", secondary_den: "1000" })
+        .where("livemode", "=", true)
+        .where("asset_id", "=", USDC_BASE)
+        .execute();
+      expect(await reasons()).toEqual(["settlement_price_depeg"]);
+    } finally {
+      await s.admin.db
+        .updateTable("tokens")
+        .set({
+          price_updated_at: new Date(),
+          secondary_price_usd: null,
+          secondary_num: null,
+          secondary_den: null,
+          secondary_updated_at: null,
+          secondary_fetched_at: null,
+          secondary_source: null,
+        })
+        .where("livemode", "=", true)
+        .execute();
+    }
+    expect(await reasons()).toEqual(["available"]);
+  });
+
   it("periodic read (RAILS-1): a missed release or engage self-heals, an older answer never wins, a failed re-read keeps the state", async () => {
     const copyRow = () =>
       s.admin.db
