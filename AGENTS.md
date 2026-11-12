@@ -1,6 +1,6 @@
 # AGENTS.md — nearpay-rails
 
-You are working in **nearpay-rails**, one of 27 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
+You are working in **nearpay-rails**, one of 26 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
 Scope: Value movement: route providers (1Click, sandbox, direct-intents), token registry, pricing/FX, executions, tracking (hot poller, Explorer feed, NEAR indexer, destination watchers with amount tags), Tier-A chain verifiers.
 
 ## Before changing anything

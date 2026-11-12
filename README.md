@@ -1,6 +1,11 @@
 # nearpay-rails
 
-> Value movement: route providers (1Click, sandbox, direct-intents), token registry, pricing/FX, executions, tracking (hot poller, Explorer feed, NEAR indexer, destination watchers with amount tags), Tier-A chain verifiers.
+Value-movement service: route providers (1Click live, sandbox in test mode), token registry, pricing and FX, executions, tracking (hot poller, Explorer feed, NEAR indexer, destination watchers with amount tags) and the chain verifiers that produce settlement evidence.
+
+Part of [NearPay](https://github.com/nearpay-money/nearpay) — start there for the live demo, the architecture diagram and the full "do X, see Y" walkthrough.
+
+- **Where it sits:** payments (and billing and agentpay, through the internal routes) ask it for options, quotes, executions and evidence; the gateway serves `/v1/assets` from it. It calls 1Click and the NEAR Intents Explorer, NEAR/EVM/Solana/Bitcoin RPCs, compliance (address screening) and, in test mode, sandbox. It never holds funds: it tracks what the route provider and the chains report.
+- **Status:** NearPay runs on NEAR mainnet as a closed beta (https://nearpay.money). This service is part of that deployment.
 
 |                                       |                                                                                                            |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -13,17 +18,17 @@
 
 ## Documentation
 
-This repo stays surgical: design docs live in [`nearpay-brain`](../nearpay-brain/README.md), not here.
+Design docs live in [`nearpay-brain`](https://github.com/nearpay-money/nearpay-brain), not here.
 
-- `nearpay-brain/lld/rails.md` — **low-level design (dev-ready; implement from this)**
-- `nearpay-brain/lld/audits/rails.md` — audit findings already folded into the LLD
-- `nearpay-brain/roadmap/development-plan.md` — stage and step this repo is built in
-- `nearpay-brain/architecture/hld.md` — system design
-- `nearpay-brain/architecture/repositories.md` — repo topology and dependency rules
-- `nearpay-brain/architecture/hld.md#10-rails-architecture-value-movement`
-- `nearpay-brain/decisions/ADR-0003-route-provider-abstraction.md`
-- `nearpay-brain/decisions/ADR-0012-independent-verification.md`
-- `nearpay-brain/reference/landscape.md`
+- [`lld/rails.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/lld/rails.md) — low-level design this repo is implemented from
+- [`lld/audits/rails.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/lld/audits/rails.md) — audit findings already folded into the LLD
+- [`roadmap/development-plan.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/roadmap/development-plan.md) — stage and step this repo is built in
+- [`architecture/hld.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/hld.md) — system design
+- [`architecture/repositories.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/repositories.md) — repo topology and dependency rules
+- [`architecture/hld.md#10-rails-architecture-value-movement`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/hld.md#10-rails-architecture-value-movement)
+- [`decisions/ADR-0003-route-provider-abstraction.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/decisions/ADR-0003-route-provider-abstraction.md)
+- [`decisions/ADR-0012-independent-verification.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/decisions/ADR-0012-independent-verification.md)
+- [`reference/landscape.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/reference/landscape.md)
 
 ## Layout
 
@@ -54,15 +59,28 @@ nearpay-rails/
 └── Dockerfile                distroless Node 22 image, `node dist/main.js <process>`
 ```
 
+## Verify this repo
+
+Needs Node 22 (`.nvmrc`) and pnpm 9. `.npmrc` points the `@nearpay-money` and `@nearpay-internal` scopes at a local package registry, so start that first.
+
+1. Start the local registry (no Docker, Node 22 only):
+   `git clone https://github.com/nearpay-money/nearpay-deploy ../nearpay-deploy && ../nearpay-deploy/scripts/registry.sh start`
+   → `curl http://127.0.0.1:4873/-/ping` answers `{}`.
+2. `pnpm install --frozen-lockfile` → ends with `Done in …`, no registry errors.
+3. `pnpm test` (unit and property tests over recorded 1Click quotes and recorded mainnet blocks; no Docker) → `Test Files  28 passed (28)`, `Tests  313 passed (313)`.
+4. `pnpm verify` (the full gate: typecheck, lint, unit tests with the coverage gate of ≥ 90 % branches on `src/domain`, integration tests, build) → exits 0. The integration step needs a running Docker daemon: Testcontainers starts Postgres, NATS, Anvil and the `nearpay/sandbox:local` image, which you build first in a [nearpay-sandbox](https://github.com/nearpay-money/nearpay-sandbox) checkout (its README has the `docker build` line). Steps 1–3 need none of that.
+
+What to read to check the one-block confirmation rule (ADR-0022): `config/chains.yaml` (per-chain evidence rule), `src/verifiers/` and `test/unit/`.
+
 ## Commands
 
-| Command                                                                                                  | What it does                                                                                                                                                |
-| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm install`                                                                                           | Install (Node 22, pnpm 9); `@nearpay-money/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it)   |
-| `pnpm test`                                                                                              | Unit and property tests                                                                                                                                     |
-| `pnpm test:integration`                                                                                  | Integration and contract tests: Postgres, NATS, the `nearpay/sandbox:local` image and Anvil in Testcontainers (needs Docker; build the sandbox image first) |
-| `pnpm verify`                                                                                            | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                            |
-| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/rails:local .` | Image (what `up.sh` runs)                                                                                                                                   |
+| Command | What it does |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | Install; NearPay packages come from the local registry (see "Verify this repo") |
+| `pnpm test` | Unit and property tests |
+| `pnpm test:integration` | Integration and contract tests: Postgres, NATS, the `nearpay/sandbox:local` image and Anvil in Testcontainers (needs Docker; build the sandbox image first) |
+| `pnpm verify` | typecheck + lint + unit tests with the coverage gate + integration tests + build |
+| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/rails:local .` | Image (what nearpay-deploy's `scripts/up.sh` runs) |
 
 ## Configuration
 
@@ -98,18 +116,25 @@ nearpay-rails/
 - **Evidence (INV-2):** `SUCCESS` means `verifying`. Success needs evidence: an EVM watcher or NEAR indexer match (tag or binding; ambiguity attributes nothing), or the verifier on the provider's destination tx (one block of the destination chain's own consensus — EVM receipt in a block on `latest`, Solana `confirmed`, Bitcoin 1 confirmation; NEAR tx FINAL; simulated chain in test mode), followed by the post-success re-check at finality (§8.12). Tier B chains accept the provider within limits. No evidence by the chain's `verification_timeout_s` → `held`. Trackers are demand-driven: with nothing in flight they make no external call.
 - **Events:** every applied change writes the row, a transition and `evt.rails.execution.updated|settled|refunded|failed|held` in one transaction; the feeds process relays the outbox.
 
-## Ops CLI (Stage 1)
+## Ops CLI
 
 ```sh
 docker compose -p nearpay exec rails-api /nodejs/bin/node dist/ops.js execution-show <ex_… | deposit address>
 ```
 
-`execution-show` · `flags` · `flag-set quoting_enabled|cross_chain_enabled true|false <reason>` (RB-01) · `tokens-refresh live|test` · `minimums-refresh`.
+`execution-show` · `flags` · `flag-set quoting_enabled|cross_chain_enabled true|false <reason>` (RB-01) · `tokens-refresh live|test` · `minimums-refresh` · `routing-health live|test` · `dead-letters …` and `outbox …` (kit 0.6.0).
 
 ## Status
 
-Stage 1 (step 1.2) and Stage 2 (step 2.2) implemented against `@nearpay-money/spec` / `@nearpay-internal/spec` 0.2.0 and kit 0.2.0: refund legs (`POST /internal/refund_executions`), pricing/FX (ECB reference rates with the TARGET-calendar bound, CoinGecko keyless secondary prices, exact rationals, `peg_currency` par), `GET /internal/fx-rates`, `/internal/settlement-estimate`, `/internal/executions/{id}/observations`, `/internal/evidence/summary`, the Explorer feed (owner token; sandbox mirror in test mode), the observation archive (Parquet, `file:` or `s3://` store) and the console routes `/ops/executions…`. Solana and Bitcoin watchers/verifiers and vault event forwarding arrive in Stage 4 (LLD §16).
+Stage 1 (step 1.2) and Stage 2 (step 2.2) implemented against `@nearpay-money/spec` / `@nearpay-internal/spec` 0.2.0 and kit 0.2.0: refund legs (`POST /internal/refund_executions`), pricing/FX (ECB reference rates with the TARGET-calendar bound, CoinGecko keyless secondary prices, exact rationals, `peg_currency` par), `GET /internal/fx-rates`, `/internal/settlement-estimate`, `/internal/executions/{id}/observations`, `/internal/evidence/summary`, the Explorer feed (owner token; sandbox mirror in test mode), the observation archive (Parquet, `file:` or `s3://` store) and the console routes `/ops/executions…`.
+
+Stage 4 (step 4.2) is implemented as well: Solana and Bitcoin destination watchers and verifiers, and forwarding of the subscription vault's events. Since then: one-block confirmations on every chain with a re-check at finality (ADR-0022), asset ids in the 1Click `.omft.near`, `.omdep.near` and `1cs_v1:` shapes, routing health (`routing-health`), and kit 0.6.0 (liveness heartbeats, dead letters). Current pins (`package.json`): `@nearpay-money/spec` 0.5.2, kit packages 0.6.0.
 
 ## Built with
 
-TypeScript 5, Node 22, `@nearpay-internal/*` kit (service, db, bus, http, auth, chains, intents, money, ids), `@defuse-protocol/one-click-sdk-typescript` (quote signatures), `ioredis` (Valkey budgets), `yaml`, `bs58`, Kysely + pg, NATS JetStream; tests with Vitest, fast-check, Testcontainers, Anvil (Foundry) and `@noble/curves`. Code and documentation are written with AI assistance (Claude) under human direction and review.
+- Runtime: TypeScript 5 on Node 22; `@nearpay-internal/*` kit (service, db, bus, http, auth, chains, intents, money, ids) with Kysely + pg and NATS JetStream underneath; `@defuse-protocol/one-click-sdk-typescript` (quote signatures), `@noble/curves`, `@noble/hashes`, `@scure/base`, `bs58`, `ioredis` (Valkey budgets), `yaml`, `zod`, `hyparquet` and `hyparquet-writer` (observation archive).
+- External services: NEAR Intents 1Click and Explorer, NEAR RPC and neardata, EVM/Solana RPCs, Bitcoin Esplora, ECB reference rates, CoinGecko (keyless).
+- Tests and tooling: Vitest, fast-check, Testcontainers, Anvil (Foundry), Biome.
+- Licence: Apache-2.0 (`LICENSE`).
+
+Code and documentation are written with AI assistance (Claude) under human direction and review. Built for the NEAR Hackathon (Nov 2026).
