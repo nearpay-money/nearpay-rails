@@ -70,8 +70,16 @@ async function candidates(r: Rails, cutoff: Date): Promise<Candidate[]> {
   return res.rows;
 }
 
-/** One run: archives batches until none is left (or `maxBatches`). Returns rows archived. */
-export async function archiveObservations(r: Rails, store: ArchiveStore | null, maxBatches = 50): Promise<number> {
+/**
+ * One run: archives batches until none is left (or `maxBatches`). Returns rows archived. `onBatch` runs after every
+ * batch (the job extends its lease there, which also beats the job worker's liveness heartbeat, kit 0.6.0).
+ */
+export async function archiveObservations(
+  r: Rails,
+  store: ArchiveStore | null,
+  maxBatches = 50,
+  onBatch?: () => Promise<void>,
+): Promise<number> {
   if (!store) return 0;
   const cutoff = new Date(r.now() - r.archive.afterDays * DAY_MS);
   let total = 0;
@@ -108,6 +116,7 @@ export async function archiveObservations(r: Rails, store: ArchiveStore | null, 
     total += records.length;
     r.metrics.archived(records.length);
     r.log.info({ key, rows: records.length, store: store.describe }, "observations archived");
+    await onBatch?.();
   }
   return total;
 }
